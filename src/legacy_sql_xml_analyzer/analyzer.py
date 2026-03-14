@@ -4,6 +4,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from xml.etree import ElementTree as ET
@@ -42,6 +43,7 @@ class AnalyzeOptions:
     entry_file: str | None = None
     entry_main_query: str | None = None
     profile: AnalysisProfile | None = None
+    snapshot_label: str | None = None
 
 
 class Analyzer:
@@ -854,6 +856,7 @@ def analyze_directory(
     entry_file: str | None = None,
     entry_main_query: str | None = None,
     profile_path: Path | None = None,
+    snapshot_label: str | None = None,
 ) -> AnalysisResult:
     profile = load_profile(profile_path)
     baseline_result: AnalysisResult | None = None
@@ -866,6 +869,7 @@ def analyze_directory(
                 entry_file=entry_file,
                 entry_main_query=entry_main_query,
                 profile=None,
+                snapshot_label=snapshot_label,
             )
         )
         baseline_result = baseline_analyzer.analyze(write_artifacts=False)
@@ -878,20 +882,30 @@ def analyze_directory(
             entry_file=entry_file,
             entry_main_query=entry_main_query,
             profile=profile,
+            snapshot_label=snapshot_label,
         )
     )
     result = analyzer.analyze(write_artifacts=True)
+    extra_artifacts: list[ArtifactDescriptor] = []
     if profile is not None and baseline_result is not None:
-        extra_artifacts = write_profile_analysis_artifacts(
+        extra_artifacts.extend(write_profile_analysis_artifacts(
             output_dir=output_dir,
             profile=profile,
             profile_path=profile_path,
             baseline=baseline_result,
             profiled=result,
             rule_usage=analyzer.rule_usage,
-        )
+        ))
         result.artifacts.extend(extra_artifacts)
         append_artifacts_to_index(output_dir, extra_artifacts)
+    history_artifacts = write_run_history_artifacts(
+        output_dir=output_dir,
+        summary=summarize_analysis_result(result),
+        profile_path=profile_path,
+        snapshot_label=snapshot_label,
+    )
+    result.artifacts.extend(history_artifacts)
+    append_artifacts_to_index(output_dir, history_artifacts)
     return result
 
 
@@ -1033,3 +1047,63 @@ def append_artifacts_to_index(output_dir: Path, extra_artifacts: list[ArtifactDe
     payload.setdefault("artifacts", [])
     payload["artifacts"].extend(item.to_dict() for item in extra_artifacts)
     index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def write_run_history_artifacts(
+    output_dir: Path,
+    summary: dict[str, Any],
+    profile_path: Path | None,
+    snapshot_label: str | None,
+) -> list[ArtifactDescriptor]:
+    analysis_root = output_dir / "analysis"
+    history_root = analysis_root / "history"
+    history_root.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc)
+    timestamp_text = timestamp.strftime("%Y%m%dT%H%M%S%fZ")
+    label = sanitize_snapshot_label(snapshot_label)
+    snapshot_name = f"{timestamp_text}-{label}.json" if label else f"{timestamp_text}.json"
+    snapshot_path = history_root / snapshot_name
+    latest_path = history_root / "latest.json"
+    index_path = history_root / "index.json"
+    run_snapshot_path = analysis_root / "run_snapshot.json"
+
+    snapshot_payload = {
+        "generated_at": timestamp.replace(microsecond=0).isoformat(),
+        "snapshot_id": snapshot_name.removesuffix(".json"),
+        "label": snapshot_label,
+        "profile_path": str(profile_path) if profile_path else None,
+        "summary": summary,
+    }
+    snapshot_path.write_text(json.dumps(snapshot_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    latest_path.write_text(json.dumps(snapshot_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    run_snapshot_path.write_text(json.dumps(snapshot_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    history_index = {"snapshots": []}
+    if index_path.exists():
+        history_index = json.loads(index_path.read_text(encoding="utf-8"))
+        history_index.setdefault("snapshots", [])
+    history_index["snapshots"].append(
+        {
+            "snapshot_id": snapshot_payload["snapshot_id"],
+            "generated_at": snapshot_payload["generated_at"],
+            "label": snapshot_label,
+            "profile_path": snapshot_payload["profile_path"],
+            "path": str(snapshot_path),
+            "summary": summary,
+        }
+    )
+    index_path.write_text(json.dumps(history_index, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return [
+        artifact_descriptor_for_path(run_snapshot_path, "json", "Current run snapshot", "history"),
+        artifact_descriptor_for_path(latest_path, "json", "Latest run snapshot", "history"),
+        artifact_descriptor_for_path(index_path, "json", "Run history index", "history"),
+    ]
+
+
+def sanitize_snapshot_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
+    return cleaned or None

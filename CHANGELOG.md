@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-03-15
+
+- Added `validate-profile` to compare baseline and profiled analysis, classify the profile as improved/stable/review/regressed, and emit validation reports.
+- Added per-run history snapshots under `analysis/history/` with `latest.json`, `index.json`, and `run_snapshot.json`.
+- Added `--snapshot-label` to `analyze` so repeated company runs can be tracked and compared over time.
+- Added tests for validation classification and run-history persistence.
+
 ## 0.2.0 - 2026-03-15
 
 - Added a Python CLI for analyzing legacy SQL XML mappings and generating JSON plus Markdown artifacts.

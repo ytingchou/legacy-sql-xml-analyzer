@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 
 from legacy_sql_xml_analyzer.analyzer import analyze_directory
 from legacy_sql_xml_analyzer.learning import freeze_profile, infer_rules, learn_directory
+from legacy_sql_xml_analyzer.validation import validate_profile
 
 
 class AnalyzerIntegrationTests(unittest.TestCase):
@@ -380,6 +381,93 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             resolved_by_name = {item.query.name: item.resolved_sql or "" for item in healed.resolved_queries}
             self.assertIn("select 'A' as module_name from dual", resolved_by_name["ConsumerMainA"])
             self.assertIn("select 'B' as module_name from dual", resolved_by_name["ConsumerMainB"])
+
+    def test_validate_profile_reports_improvement_for_useful_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            learn_output_dir = root / "learn-output"
+            rule_output_dir = root / "rule-output"
+            validation_output_dir = root / "validation-output"
+            frozen_profile_path = root / "profiles" / "company_profile.json"
+            input_dir.mkdir()
+
+            (input_dir / "shared-query.xml").write_text(
+                """<sql-mapping>
+  <main-query name="SharedMain">
+    <sql-body><![CDATA[
+      select * from shared_table
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "consumer.xml").write_text(
+                """<sql-mapping>
+  <main-query name="ConsumerMain">
+    <ext-sql-refer-to name="__EXT__" xml="shared" main-query="SharedMain" />
+    <sql-body><![CDATA[
+      select * from dual __EXT__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            learn_directory(input_dir=input_dir, output_dir=learn_output_dir)
+            infer_rules(learn_output_dir / "learning" / "observations.json", rule_output_dir)
+            freeze_profile(rule_output_dir / "learning" / "rule_candidates.json", frozen_profile_path, min_confidence=0.8)
+
+            result = validate_profile(
+                input_dir=input_dir,
+                output_dir=validation_output_dir,
+                profile_path=frozen_profile_path,
+            )
+
+            self.assertEqual("improved", result["assessment"]["classification"])
+            self.assertTrue((validation_output_dir / "validation" / "profile_validation.json").exists())
+            payload = json.loads((validation_output_dir / "validation" / "profile_validation.json").read_text(encoding="utf-8"))
+            self.assertGreater(payload["delta"]["resolved_queries_delta"], 0)
+            self.assertLess(payload["delta"]["error_delta"], 0)
+
+    def test_analyze_writes_run_history_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+
+            (input_dir / "sample.xml").write_text(
+                """<sql-mapping>
+  <main-query name="SnapshotMain">
+    <parameter name=":demo" data_type="String" />
+    <sql-body><![CDATA[
+      select CAST(:demo AS VARCHAR2(20)) demo_col from dual
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir, snapshot_label="first-pass")
+            analyze_directory(input_dir=input_dir, output_dir=output_dir, snapshot_label="second-pass")
+
+            history_index_path = output_dir / "analysis" / "history" / "index.json"
+            latest_path = output_dir / "analysis" / "history" / "latest.json"
+            run_snapshot_path = output_dir / "analysis" / "run_snapshot.json"
+            self.assertTrue(history_index_path.exists())
+            self.assertTrue(latest_path.exists())
+            self.assertTrue(run_snapshot_path.exists())
+
+            history_payload = json.loads(history_index_path.read_text(encoding="utf-8"))
+            self.assertEqual(2, len(history_payload["snapshots"]))
+            self.assertEqual("second-pass", history_payload["snapshots"][-1]["label"])
+
+            latest_payload = json.loads(latest_path.read_text(encoding="utf-8"))
+            self.assertEqual("second-pass", latest_payload["label"])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .analyzer import analyze_directory
 from .learning import freeze_profile, infer_rules, learn_directory
+from .validation import validate_profile
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--entry-file", help="Optional XML filename to emphasize in artifacts.")
     analyze_parser.add_argument("--entry-main-query", help="Optional main-query name to emphasize in artifacts.")
     analyze_parser.add_argument("--profile", type=Path, help="Optional learned/frozen profile JSON.")
+    analyze_parser.add_argument("--snapshot-label", help="Optional label for run history snapshots.")
     analyze_parser.add_argument("--strict", action="store_true", help="Exit non-zero when any error or fatal diagnostic exists.")
 
     learn_parser = subparsers.add_parser("learn", help="Observe XML structure and generate learning artifacts.")
@@ -36,6 +38,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.8,
         help="Minimum rule confidence required to keep a rule in the frozen profile.",
     )
+
+    validate_parser = subparsers.add_parser("validate-profile", help="Validate a learned profile against baseline analysis.")
+    validate_parser.add_argument("--input", required=True, type=Path, help="Input directory that contains XML files.")
+    validate_parser.add_argument("--output", required=True, type=Path, help="Output directory for validation artifacts.")
+    validate_parser.add_argument("--profile", required=True, type=Path, help="Frozen or learned profile JSON.")
+    validate_parser.add_argument("--entry-file", help="Optional XML filename to emphasize in validation.")
+    validate_parser.add_argument("--entry-main-query", help="Optional main-query name to emphasize in validation.")
+    validate_parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="Exit non-zero when validation classifies the profile as regressed.",
+    )
     return parser
 
 
@@ -51,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             entry_file=args.entry_file,
             entry_main_query=args.entry_main_query,
             profile_path=args.profile.resolve() if args.profile else None,
+            snapshot_label=args.snapshot_label,
         )
 
         error_count = sum(1 for diag in result.diagnostics if diag.severity in {"error", "fatal"})
@@ -86,6 +101,24 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Froze profile with {len(profile.rules)} retained rule(s) at confidence >= {args.min_confidence:.2f}."
         )
+        return 0
+
+    if args.command == "validate-profile":
+        result = validate_profile(
+            input_dir=args.input.resolve(),
+            output_dir=args.output.resolve(),
+            profile_path=args.profile.resolve(),
+            entry_file=args.entry_file,
+            entry_main_query=args.entry_main_query,
+        )
+        classification = result["assessment"]["classification"]
+        print(
+            f"Validated profile with classification={classification}, "
+            f"generated {len(result['artifacts'])} validation artifact(s)."
+        )
+        if args.fail_on_regression and classification == "regressed":
+            print("Validation detected regression. See validation/profile_validation.md for details.")
+            return 3
         return 0
 
     parser.error(f"Unsupported command: {args.command}")

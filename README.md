@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v0.2.0`
+Current local release: `v0.3.0`
 
 ## Usage
 
@@ -43,6 +43,23 @@ When `analyze` runs with `--profile`, it also emits:
 - `analysis/applied_rules.json`: the active profile defaults, retained rules, and runtime usage counters
 - `analysis/fix_delta.json`: baseline-vs-profiled comparison for resolved queries and diagnostics
 - `analysis/fix_delta.md`: a compact human-readable delta summary
+
+When `analyze` runs with `--snapshot-label`, it also persists run history:
+
+- `analysis/run_snapshot.json`: the current run summary
+- `analysis/history/latest.json`: the latest run in this output directory
+- `analysis/history/index.json`: accumulated run history for repeated executions
+
+Validate whether a frozen profile is actually helping:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer validate-profile --input ./xml --output ./validation --profile ./profiles/company_profile.json
+```
+
+`validate-profile` emits:
+
+- `validation/profile_validation.json`: machine-readable assessment, deltas, and rule usage
+- `validation/profile_validation.md`: human-readable summary with recommendation
 
 Learned profiles can currently auto-heal:
 
