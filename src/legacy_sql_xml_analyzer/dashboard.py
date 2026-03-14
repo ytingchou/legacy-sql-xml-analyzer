@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 from collections import Counter, defaultdict
@@ -29,14 +30,71 @@ def write_executive_report(
     json_path = analysis_root / "executive_summary.json"
     md_path = analysis_root / "executive_summary.md"
     html_path = analysis_root / "dashboard.html"
+    complexity_csv_path = analysis_root / "executive_complexity.csv"
+    value_csv_path = analysis_root / "executive_value.csv"
+    diagnostics_csv_path = analysis_root / "executive_diagnostics.csv"
+    trend_csv_path = analysis_root / "executive_trend.csv"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_executive_summary_markdown(summary), encoding="utf-8")
     html_path.write_text(render_dashboard_html(summary), encoding="utf-8")
+    write_csv(
+        complexity_csv_path,
+        summary["complexity_summary"]["top_complex_queries"],
+        [
+            "query_id",
+            "file",
+            "query_type",
+            "status",
+            "complexity_score",
+            "complexity_risk",
+            "value_score",
+            "dependencies",
+            "inbound_references",
+            "joins",
+            "subqueries",
+            "unions",
+            "parameters",
+            "tables",
+            "line_count",
+            "statement_type",
+        ],
+    )
+    write_csv(
+        value_csv_path,
+        summary["value_summary"]["top_value_queries"],
+        [
+            "query_id",
+            "file",
+            "query_type",
+            "status",
+            "value_score",
+            "complexity_score",
+            "complexity_risk",
+            "inbound_references",
+            "dependencies",
+            "parameters",
+            "statement_type",
+        ],
+    )
+    write_csv(
+        diagnostics_csv_path,
+        summary["diagnostics_summary"]["top_codes"],
+        ["code", "count"],
+    )
+    write_csv(
+        trend_csv_path,
+        summary["trend_summary"]["history"],
+        ["snapshot_id", "generated_at", "label", "resolved_queries", "partial_queries", "failed_queries", "error_count", "warning_count"],
+    )
 
     return [
         artifact_descriptor_for_path(json_path, "json", "Executive summary", "executive"),
         artifact_descriptor_for_path(md_path, "markdown", "Executive summary (Markdown)", "executive"),
         artifact_descriptor_for_path(html_path, "html", "Executive dashboard", "executive"),
+        artifact_descriptor_for_path(complexity_csv_path, "csv", "Executive complexity export", "executive"),
+        artifact_descriptor_for_path(value_csv_path, "csv", "Executive value export", "executive"),
+        artifact_descriptor_for_path(diagnostics_csv_path, "csv", "Executive diagnostics export", "executive"),
+        artifact_descriptor_for_path(trend_csv_path, "csv", "Executive trend export", "executive"),
     ]
 
 
@@ -51,14 +109,8 @@ def build_executive_summary(
         for dependency in set(resolved.dependencies)
     )
     file_diagnostics = Counter(str(diagnostic.source_path) for diagnostic in result.diagnostics)
-    history_index_path = output_dir / "analysis" / "history" / "index.json"
-    snapshot_count = 0
-    if history_index_path.exists():
-        try:
-            history_payload = json.loads(history_index_path.read_text(encoding="utf-8"))
-            snapshot_count = len(history_payload.get("snapshots", []))
-        except json.JSONDecodeError:
-            snapshot_count = 0
+    trend_summary = build_trend_summary(output_dir)
+    snapshot_count = trend_summary["snapshot_count"]
 
     complexity_rows = [
         complexity_row(resolved, inbound_references[resolved.query.id])
@@ -105,6 +157,7 @@ def build_executive_summary(
             "snapshot_count": snapshot_count,
         },
         "management_summary": management_summary,
+        "trend_summary": trend_summary,
         "complexity_summary": {
             "average_score": round(
                 sum(item["complexity_score"] for item in complexity_rows) / max(len(complexity_rows), 1),
@@ -288,6 +341,15 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
             f"query_type={item['query_type']}"
         )
 
+    lines.extend(["", "## Trend"])
+    trend = summary["trend_summary"]
+    lines.append(
+        f"- Snapshot count: {trend['snapshot_count']}, resolved delta vs previous: {trend['resolved_queries_delta_vs_previous']:+d}, "
+        f"error delta vs previous: {trend['error_count_delta_vs_previous']:+d}, warning delta vs previous: {trend['warning_count_delta_vs_previous']:+d}"
+    )
+    if trend["status_line"]:
+        lines.append(f"- {trend['status_line']}")
+
     lines.extend(["", "## Next Actions"])
     for item in summary["next_actions"]:
         lines.append(f"- {item}")
@@ -307,6 +369,16 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
     file_rows = "".join(
         f"<tr><td>{escape_html(Path(item['file']).name)}</td><td>{item['diagnostic_count']}</td></tr>"
         for item in summary["value_summary"]["top_files_by_diagnostics"]
+    )
+    trend = summary["trend_summary"]
+    trend_history = trend["history"]
+    resolved_sparkline = render_sparkline_svg([item["resolved_queries"] for item in trend_history], "#174b63")
+    error_sparkline = render_sparkline_svg([item["error_count"] for item in trend_history], "#8f1d22")
+    warning_sparkline = render_sparkline_svg([item["warning_count"] for item in trend_history], "#b45f29")
+    trend_rows = "".join(
+        f"<tr><td>{escape_html(item['label'] or item['snapshot_id'])}</td><td>{item['resolved_queries']}</td>"
+        f"<td>{item['error_count']}</td><td>{item['warning_count']}</td></tr>"
+        for item in trend_history[-8:]
     )
 
     return f"""<!DOCTYPE html>
@@ -380,6 +452,12 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
       gap: 16px;
       margin-bottom: 16px;
     }}
+    .three-col {{
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -419,7 +497,7 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
       font-size: 0.9rem;
     }}
     @media (max-width: 960px) {{
-      .hero, .two-col {{
+      .hero, .two-col, .three-col {{
         grid-template-columns: 1fr;
       }}
     }}
@@ -459,6 +537,27 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
       <div class="panel">
         <h2>Next Actions</h2>
         <ul>{next_actions}</ul>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="panel">
+        <h2>Progress Trend</h2>
+        <p>{escape_html(trend['status_line'] or 'Trend data will appear after repeated runs in the same output directory.')}</p>
+        <div style="display:grid; gap:10px;">
+          <div><strong>Resolved Queries</strong>{resolved_sparkline}</div>
+          <div><strong>Error Count</strong>{error_sparkline}</div>
+          <div><strong>Warning Count</strong>{warning_sparkline}</div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Recent Snapshots</h2>
+        <table>
+          <thead>
+            <tr><th>Snapshot</th><th>Resolved</th><th>Errors</th><th>Warnings</th></tr>
+          </thead>
+          <tbody>{trend_rows or '<tr><td colspan=\"4\">No history yet</td></tr>'}</tbody>
+        </table>
       </div>
     </section>
 
@@ -543,4 +642,90 @@ def escape_html(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+    )
+
+
+def build_trend_summary(output_dir: Path) -> dict[str, Any]:
+    history_index_path = output_dir / "analysis" / "history" / "index.json"
+    snapshots = []
+    if history_index_path.exists():
+        try:
+            history_payload = json.loads(history_index_path.read_text(encoding="utf-8"))
+            snapshots = history_payload.get("snapshots", [])
+        except json.JSONDecodeError:
+            snapshots = []
+
+    normalized = []
+    for item in snapshots:
+        summary = item.get("summary", {})
+        normalized.append(
+            {
+                "snapshot_id": item.get("snapshot_id"),
+                "generated_at": item.get("generated_at"),
+                "label": item.get("label"),
+                "resolved_queries": int(summary.get("resolved_queries", 0)),
+                "partial_queries": int(summary.get("partial_queries", 0)),
+                "failed_queries": int(summary.get("failed_queries", 0)),
+                "error_count": int(summary.get("diagnostics_by_severity", {}).get("error", 0))
+                + int(summary.get("diagnostics_by_severity", {}).get("fatal", 0)),
+                "warning_count": int(summary.get("diagnostics_by_severity", {}).get("warning", 0)),
+            }
+        )
+
+    normalized.sort(key=lambda item: item.get("generated_at") or "")
+    previous = normalized[-2] if len(normalized) >= 2 else None
+    current = normalized[-1] if normalized else None
+    resolved_delta = (current["resolved_queries"] - previous["resolved_queries"]) if current and previous else 0
+    error_delta = (current["error_count"] - previous["error_count"]) if current and previous else 0
+    warning_delta = (current["warning_count"] - previous["warning_count"]) if current and previous else 0
+    status_line = ""
+    if current and previous:
+        if resolved_delta > 0 or error_delta < 0 or warning_delta < 0:
+            status_line = "Current run is trending in a positive direction versus the previous snapshot."
+        elif resolved_delta < 0 or error_delta > 0:
+            status_line = "Current run regressed versus the previous snapshot and should be reviewed."
+        else:
+            status_line = "Current run is broadly stable versus the previous snapshot."
+    elif current:
+        status_line = "Trend analysis will become more meaningful after at least two runs."
+
+    return {
+        "snapshot_count": len(normalized),
+        "resolved_queries_delta_vs_previous": resolved_delta,
+        "error_count_delta_vs_previous": error_delta,
+        "warning_count_delta_vs_previous": warning_delta,
+        "status_line": status_line,
+        "history": normalized,
+    }
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def render_sparkline_svg(values: list[int], stroke: str) -> str:
+    if not values:
+        return "<svg width=\"100%\" height=\"54\" viewBox=\"0 0 240 54\"></svg>"
+    if len(values) == 1:
+        values = values + values
+    width = 240
+    height = 54
+    min_value = min(values)
+    max_value = max(values)
+    spread = max(max_value - min_value, 1)
+    points = []
+    for index, value in enumerate(values):
+        x = 8 + (index * (width - 16) / max(len(values) - 1, 1))
+        y = height - 8 - ((value - min_value) / spread) * (height - 16)
+        points.append(f"{x:.1f},{y:.1f}")
+    polyline = " ".join(points)
+    return (
+        f"<svg width=\"100%\" height=\"54\" viewBox=\"0 0 {width} {height}\" preserveAspectRatio=\"none\">"
+        f"<polyline fill=\"none\" stroke=\"{stroke}\" stroke-width=\"3\" points=\"{polyline}\" />"
+        "</svg>"
     )

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - 2026-03-15
+
+- Added trend-aware executive reporting that reads repeated run snapshots and summarizes whether quality is improving, stable, or regressing.
+- Added CSV exports for complexity hotspots, value hotspots, diagnostic hotspots, and history trend data for spreadsheet workflows.
+- Enhanced the static dashboard with progress trend sparklines and recent snapshot comparisons.
+- Added tests covering trend summaries and executive CSV output.
+
 ## 0.4.0 - 2026-03-15
 
 - Added executive summary artifacts in JSON and Markdown plus a static HTML dashboard for management reporting.

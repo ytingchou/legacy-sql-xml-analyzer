@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v0.4.0`
+Current local release: `v0.5.0`
 
 ## Usage
 
@@ -52,6 +52,10 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/executive_summary.json`: machine-readable management summary, complexity hotspots, and value hotspots
 - `analysis/executive_summary.md`: concise report for status updates and leadership reviews
 - `analysis/dashboard.html`: static web dashboard for browsing results in a browser
+- `analysis/executive_complexity.csv`: spreadsheet-ready complexity hotspot export
+- `analysis/executive_value.csv`: spreadsheet-ready value hotspot export
+- `analysis/executive_diagnostics.csv`: spreadsheet-ready diagnostic hotspot export
+- `analysis/executive_trend.csv`: spreadsheet-ready run trend export
 
 Validate whether a frozen profile is actually helping:
 
@@ -69,6 +73,8 @@ Serve the generated dashboard locally:
 ```bash
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer serve-report --root ./analysis-output --port 8000
 ```
+
+If you keep reusing the same `--output` directory across runs, the executive dashboard will also show trend direction and recent snapshot comparisons.
 
 Learned profiles can currently auto-heal:
 

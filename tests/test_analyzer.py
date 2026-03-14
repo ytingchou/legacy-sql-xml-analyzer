@@ -88,9 +88,13 @@ class AnalyzerIntegrationTests(unittest.TestCase):
 
             payload = json.loads(index_path.read_text(encoding="utf-8"))
             executive_payload = json.loads(executive_summary_path.read_text(encoding="utf-8"))
+            complexity_csv_path = output_dir / "analysis" / "executive_complexity.csv"
+            trend_csv_path = output_dir / "analysis" / "executive_trend.csv"
             self.assertGreaterEqual(len(payload["artifacts"]), 3)
             self.assertTrue(executive_payload["management_summary"])
             self.assertTrue(executive_payload["complexity_summary"]["top_complex_queries"])
+            self.assertTrue(complexity_csv_path.exists())
+            self.assertTrue(trend_csv_path.exists())
             self.assertEqual(0, len([item for item in result.diagnostics if item.severity in {"error", "fatal"}]))
 
     def test_lints_and_diagnostics_are_emitted_for_rule_violations(self) -> None:
@@ -475,6 +479,10 @@ class AnalyzerIntegrationTests(unittest.TestCase):
 
             latest_payload = json.loads(latest_path.read_text(encoding="utf-8"))
             self.assertEqual("second-pass", latest_payload["label"])
+
+            executive_payload = json.loads((output_dir / "analysis" / "executive_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(2, executive_payload["trend_summary"]["snapshot_count"])
+            self.assertIn("stable", executive_payload["trend_summary"]["status_line"].lower())
 
 
 if __name__ == "__main__":
