@@ -76,14 +76,21 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             self.assertIn(":fPriceCheckRule", price_check.sql_stats["parameters"])
 
             index_path = output_dir / "analysis" / "index.json"
+            executive_summary_path = output_dir / "analysis" / "executive_summary.json"
+            executive_dashboard_path = output_dir / "analysis" / "dashboard.html"
             overview_path = output_dir / "analysis" / "markdown" / "overview.md"
             query_card = output_dir / "analysis" / "markdown" / "queries" / "main.xml_main_PriceCheck.md"
             self.assertTrue(index_path.exists())
+            self.assertTrue(executive_summary_path.exists())
+            self.assertTrue(executive_dashboard_path.exists())
             self.assertTrue(overview_path.exists())
             self.assertTrue(query_card.exists())
 
             payload = json.loads(index_path.read_text(encoding="utf-8"))
+            executive_payload = json.loads(executive_summary_path.read_text(encoding="utf-8"))
             self.assertGreaterEqual(len(payload["artifacts"]), 3)
+            self.assertTrue(executive_payload["management_summary"])
+            self.assertTrue(executive_payload["complexity_summary"]["top_complex_queries"])
             self.assertEqual(0, len([item for item in result.diagnostics if item.severity in {"error", "fatal"}]))
 
     def test_lints_and_diagnostics_are_emitted_for_rule_violations(self) -> None:

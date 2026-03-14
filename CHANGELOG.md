@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 - 2026-03-15
+
+- Added executive summary artifacts in JSON and Markdown plus a static HTML dashboard for management reporting.
+- Added complexity and value hotspot ranking so large SQL XML projects can be summarized for stakeholders.
+- Added `serve-report` to host the generated dashboard locally through a lightweight stdlib web server.
+- Added tests covering executive summary and dashboard generation.
+
 ## 0.3.0 - 2026-03-15
 
 - Added `validate-profile` to compare baseline and profiled analysis, classify the profile as improved/stable/review/regressed, and emit validation reports.

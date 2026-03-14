@@ -6,6 +6,7 @@ from pathlib import Path
 from .analyzer import analyze_directory
 from .learning import freeze_profile, infer_rules, learn_directory
 from .validation import validate_profile
+from .web import serve_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit non-zero when validation classifies the profile as regressed.",
     )
+
+    serve_parser = subparsers.add_parser("serve-report", help="Serve the generated HTML dashboard locally.")
+    serve_parser.add_argument("--root", required=True, type=Path, help="Output directory that contains analysis/dashboard.html.")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind.")
+    serve_parser.add_argument("--port", type=int, default=8000, help="Port to bind the local HTTP server.")
     return parser
 
 
@@ -119,6 +125,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.fail_on_regression and classification == "regressed":
             print("Validation detected regression. See validation/profile_validation.md for details.")
             return 3
+        return 0
+
+    if args.command == "serve-report":
+        serve_report(root=args.root.resolve(), host=args.host, port=args.port)
         return 0
 
     parser.error(f"Unsupported command: {args.command}")

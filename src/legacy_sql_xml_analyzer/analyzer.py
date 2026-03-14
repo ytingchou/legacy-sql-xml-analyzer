@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from xml.etree import ElementTree as ET
 
+from .dashboard import write_executive_report
 from .learning import AnalysisProfile, load_profile
 from .models import (
     ALLOWED_DATA_TYPES,
@@ -906,6 +907,13 @@ def analyze_directory(
     )
     result.artifacts.extend(history_artifacts)
     append_artifacts_to_index(output_dir, history_artifacts)
+    executive_artifacts = write_executive_report(
+        output_dir=output_dir,
+        result=result,
+        profile_path=profile_path,
+    )
+    result.artifacts.extend(executive_artifacts)
+    append_artifacts_to_index(output_dir, executive_artifacts)
     return result
 
 
