@@ -11,6 +11,7 @@ from .evolution import (
     simulate_candidate_profile,
 )
 from .lifecycle import grade_profile, promote_profile
+from .llm_provider import invoke_llm_from_analysis
 from .learning import freeze_profile, infer_rules, learn_directory
 from .prompting import prepare_prompt_pack_from_analysis
 from .validation import validate_profile
@@ -70,6 +71,27 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_parser.add_argument("--cluster", required=True, help="cluster_id from failure_clusters.json.")
     prompt_parser.add_argument("--budget", default="128k", choices=["8k", "32k", "128k"], help="Target prompt budget.")
     prompt_parser.add_argument("--model", default="weak-128k", help="Descriptive model profile label for the pack.")
+
+    invoke_parser = subparsers.add_parser(
+        "invoke-llm",
+        help="Send a staged prompt pack to an OpenAI-compatible provider and optionally review the response.",
+    )
+    invoke_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory or analysis directory that contains failure_clusters.json.")
+    invoke_parser.add_argument("--cluster", required=True, help="cluster_id from failure_clusters.json.")
+    invoke_parser.add_argument("--stage", default="propose", choices=["classify", "propose", "verify"], help="Prompt stage to send.")
+    invoke_parser.add_argument("--budget", default="128k", choices=["8k", "32k", "128k"], help="Prompt budget label used to resolve the prompt pack.")
+    invoke_parser.add_argument("--prompt-model", default="weak-128k", help="Prompt-pack model label used to resolve the prompt files.")
+    invoke_parser.add_argument("--provider-config", type=Path, help="Optional JSON config for the OpenAI-compatible provider.")
+    invoke_parser.add_argument("--provider-base-url", help="Provider base URL or /v1 root for the OpenAI-compatible endpoint.")
+    invoke_parser.add_argument("--provider-api-key", help="Provider API key. If omitted, --provider-api-key-env or provider-config is used.")
+    invoke_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY", help="Environment variable name that stores the provider API key.")
+    invoke_parser.add_argument("--provider-model", help="Provider model id to send to the chat/completions endpoint.")
+    invoke_parser.add_argument("--provider-name", help="Optional provider label for saved artifacts.")
+    invoke_parser.add_argument("--token-limit", type=int, help="Maximum completion tokens to request from the provider.")
+    invoke_parser.add_argument("--temperature", type=float, help="Sampling temperature sent to the provider.")
+    invoke_parser.add_argument("--timeout-seconds", type=float, help="HTTP timeout for provider requests.")
+    invoke_parser.add_argument("--review", action="store_true", help="Immediately run review-llm-response on the saved response text.")
+    invoke_parser.add_argument("--profile", type=Path, help="Optional profile JSON used during review to detect redundant or conflicting rules.")
 
     review_parser = subparsers.add_parser(
         "review-llm-response",
@@ -211,6 +233,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             f"Prepared prompt pack for cluster={result['cluster']['cluster_id']}, "
+            f"generated {len(result['artifacts'])} artifact(s)."
+        )
+        return 0
+
+    if args.command == "invoke-llm":
+        result = invoke_llm_from_analysis(
+            analysis_root=args.analysis_root.resolve(),
+            cluster_id=args.cluster,
+            stage=args.stage,
+            budget=args.budget,
+            prompt_model=args.prompt_model,
+            provider_config_path=args.provider_config.resolve() if args.provider_config else None,
+            provider_base_url=args.provider_base_url,
+            provider_api_key=args.provider_api_key,
+            provider_api_key_env=args.provider_api_key_env,
+            provider_model=args.provider_model,
+            provider_name=args.provider_name,
+            token_limit=args.token_limit,
+            temperature=args.temperature,
+            timeout_seconds=args.timeout_seconds,
+            review=args.review,
+            profile_path=args.profile.resolve() if args.profile else None,
+        )
+        summary = result["run_summary"]
+        print(
+            f"Invoked provider={summary['provider_name']} model={summary['provider_model']} "
+            f"for cluster={summary['cluster_id']} stage={summary['stage']} token_limit={summary['token_limit']}, "
             f"generated {len(result['artifacts'])} artifact(s)."
         )
         return 0

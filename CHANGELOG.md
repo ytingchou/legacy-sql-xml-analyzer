@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0 - 2026-03-15
+
+- Added `invoke-llm` for direct OpenAI-compatible `/chat/completions` provider integration using staged prompt packs.
+- Added configurable provider token limits, temperature, timeout, API key env lookup, and JSON provider config support.
+- Added saved `analysis/llm_runs/` artifacts for request payloads, raw responses, extracted text, and run summaries.
+- Relaxed SQL XML parameter linting so parameter names no longer need `:` and `data_type` is no longer type-validated.
+- Added tests covering direct provider invocation with configurable token limits and automatic review.
+
 ## 0.9.0 - 2026-03-15
 
 - Added lifecycle metadata to profiles, including status, parent profile, display name, and validation history.

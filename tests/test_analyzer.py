@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ from legacy_sql_xml_analyzer.evolution import (
     simulate_candidate_profile,
 )
 from legacy_sql_xml_analyzer.lifecycle import grade_profile, promote_profile
+from legacy_sql_xml_analyzer.llm_provider import invoke_llm_from_analysis
 from legacy_sql_xml_analyzer.learning import freeze_profile, infer_rules, learn_directory
 from legacy_sql_xml_analyzer.prompting import prepare_prompt_pack_from_analysis
 from legacy_sql_xml_analyzer.validation import validate_profile
@@ -142,8 +144,8 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             result = analyze_directory(input_dir=input_dir, output_dir=output_dir)
             codes = {diagnostic.code for diagnostic in result.diagnostics}
 
-            self.assertIn("PARAMETER_PREFIX_INVALID", codes)
-            self.assertIn("PARAMETER_DATATYPE_INVALID", codes)
+            self.assertNotIn("PARAMETER_PREFIX_INVALID", codes)
+            self.assertNotIn("PARAMETER_DATATYPE_INVALID", codes)
             self.assertIn("COMMENT_FORBIDDEN_CHAR", codes)
             self.assertIn("DML_SEMICOLON_MISSING", codes)
             self.assertIn("DATASET_CAST_MISSING", codes)
@@ -941,6 +943,123 @@ class AnalyzerIntegrationTests(unittest.TestCase):
 
             self.assertEqual("trusted", grade_result["grade_payload"]["suggested_status"])
             self.assertEqual("promote", grade_result["grade_payload"]["promotion_readiness"])
+
+    def test_invoke_llm_uses_openai_compatible_provider_and_token_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            provider_config_path = root / "provider.json"
+            input_dir.mkdir()
+
+            (input_dir / "shared-query.xml").write_text(
+                """<sql-mapping>
+  <main-query name="SharedMain">
+    <sql-body><![CDATA[
+      select * from shared_table
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "consumer.xml").write_text(
+                """<sql-mapping>
+  <main-query name="ConsumerMain">
+    <ext-sql-refer-to name="__EXT__" xml="shared" main-query="SharedMain" />
+    <sql-body><![CDATA[
+      select * from dual __EXT__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir)
+            provider_config_path.write_text(
+                json.dumps(
+                    {
+                        "name": "demo-provider",
+                        "base_url": "https://llm.example.test/v1",
+                        "model": "demo-model",
+                        "api_key_env": "TEST_LLM_KEY",
+                        "token_limit": 777,
+                        "temperature": 0.1,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            fake_response = {
+                "id": "chatcmpl-demo",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "cluster_id": "reference_target_missing",
+                                    "problem_type": "mapping_inference",
+                                    "root_cause": "shared should map to shared-query.xml.",
+                                    "proposed_change_type": "profile_rule",
+                                    "proposed_rule_or_fix": {
+                                        "rule_type": "external_xml_name_mapping",
+                                        "scope": "global",
+                                        "payload": {
+                                            "xml_name": "shared",
+                                            "mapped_to": "shared-query.xml",
+                                        },
+                                    },
+                                    "confidence": "high",
+                                    "why": ["The alias matches a single observed file."],
+                                    "verification_steps": ["Run analyze with the candidate profile."],
+                                    "risks": ["Another module could override the alias."],
+                                    "insufficient_evidence": False,
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 123,
+                    "completion_tokens": 45,
+                    "total_tokens": 168,
+                },
+            }
+
+            with mock.patch.dict("os.environ", {"TEST_LLM_KEY": "secret-key"}, clear=False):
+                with mock.patch("legacy_sql_xml_analyzer.llm_provider._post_json", return_value=fake_response) as mocked_post:
+                    result = invoke_llm_from_analysis(
+                        analysis_root=output_dir,
+                        cluster_id="reference_target_missing",
+                        stage="propose",
+                        budget="32k",
+                        prompt_model="weak-128k",
+                        provider_config_path=provider_config_path,
+                        review=True,
+                    )
+
+            mocked_post.assert_called_once()
+            call_args = mocked_post.call_args.kwargs
+            self.assertEqual(777, call_args["payload"]["max_tokens"])
+            self.assertEqual("demo-model", call_args["payload"]["model"])
+
+            run_summary = result["run_summary"]
+            self.assertEqual(777, run_summary["token_limit"])
+            self.assertEqual("demo-model", run_summary["provider_model"])
+            self.assertEqual("accepted", result["review"]["review"]["status"])
+
+            llm_runs_root = output_dir / "analysis" / "llm_runs"
+            self.assertTrue(any(path.is_dir() for path in llm_runs_root.iterdir()))
+            latest_run = sorted(llm_runs_root.iterdir())[-1]
+            summary_payload = json.loads((latest_run / "run_summary.json").read_text(encoding="utf-8"))
+            request_payload = json.loads((latest_run / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual(777, summary_payload["token_limit"])
+            self.assertEqual("demo-provider", summary_payload["provider_name"])
+            self.assertEqual(777, request_payload["request_payload"]["max_tokens"])
 
 
 if __name__ == "__main__":

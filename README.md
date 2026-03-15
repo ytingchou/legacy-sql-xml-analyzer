@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v0.9.0`
+Current local release: `v0.10.0`
 
 ## Usage
 
@@ -62,6 +62,10 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/prompt_packs/*.json`: prompt metadata, stage schemas, and bundle metadata
 - `analysis/llm_reviews/*.json`: reviewed weak-LLM responses, patch candidates, and follow-up prompt metadata
 - `analysis/llm_reviews/*.md`: human-readable review summaries for weak-LLM responses
+- `analysis/llm_runs/*/request.json`: sanitized OpenAI-compatible request payloads
+- `analysis/llm_runs/*/response.json`: raw provider responses
+- `analysis/llm_runs/*/response.txt`: extracted assistant text responses
+- `analysis/llm_runs/*/run_summary.json`: saved provider, model, token-limit, and usage metadata
 - `analysis/proposals/rule_proposals.json`: accepted patch candidates collected from reviewed weak-LLM answers
 - `analysis/proposals/candidate_profile.json`: merged candidate profile generated from accepted patch candidates
 - `grade/profile_grade.json`: lifecycle grading for a candidate or promoted profile
@@ -109,6 +113,40 @@ PYTHONPATH=src python3 -m legacy_sql_xml_analyzer review-llm-response --analysis
 - generate a repair prompt when the JSON or fields are invalid
 - generate a follow-up prompt for the next stage when the answer is usable
 - emit a profile patch candidate for safe rule types such as XML alias mappings or token patterns
+
+Invoke an OpenAI-compatible provider directly from a staged prompt pack:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer invoke-llm --analysis-root ./analysis-output --cluster reference_target_missing --stage propose --budget 32k --provider-base-url https://provider.example.com/v1 --provider-model your-model --provider-api-key-env OPENAI_API_KEY --token-limit 2048 --review
+```
+
+You can also keep provider settings in a JSON file:
+
+```json
+{
+  "name": "company-weak-llm",
+  "base_url": "https://provider.example.com/v1",
+  "model": "your-model",
+  "api_key_env": "OPENAI_API_KEY",
+  "token_limit": 2048,
+  "temperature": 0.0,
+  "timeout_seconds": 60.0
+}
+```
+
+Then invoke it with:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer invoke-llm --analysis-root ./analysis-output --cluster reference_target_missing --provider-config ./provider.json --review
+```
+
+`invoke-llm` is designed for OpenAI-compatible `/chat/completions` providers and saves:
+
+- the sanitized request payload, without embedding the API key
+- the raw JSON provider response
+- the extracted assistant text
+- token-limit and usage metadata for later debugging
+- optional automatic review output when `--review` is enabled
 
 Collect accepted reviewed patches into a candidate profile:
 

@@ -5,17 +5,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-ALLOWED_DATA_TYPES = {
-    "Int",
-    "Double",
-    "String",
-    "DateTime",
-    "IntArray",
-    "StringArray",
-    "SQL",
-}
-
-
 Severity = Literal["info", "warning", "error", "fatal"]
 QueryType = Literal["main", "sub"]
 ReferenceMode = Literal["refer", "copy"]

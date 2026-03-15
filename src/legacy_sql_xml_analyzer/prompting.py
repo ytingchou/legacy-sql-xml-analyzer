@@ -70,7 +70,7 @@ def prepare_prompt_pack(
     prompt_root = analysis_root / "prompt_packs"
     prompt_root.mkdir(parents=True, exist_ok=True)
     cluster_id = cluster["cluster_id"]
-    base_name = f"{cluster_id}-{sanitize_token(budget)}-{sanitize_token(model)}"
+    base_name = prompt_pack_base_name(cluster_id, budget, model)
     sample_limit = BUDGET_TO_EXAMPLES.get(budget, 3)
     samples = cluster["sample_diagnostics"][:sample_limit]
     bundle_payload = {
@@ -101,8 +101,8 @@ def prepare_prompt_pack(
                 "samples": samples,
                 "prompt_text": prompt_text,
             }
-            text_path = prompt_root / f"{base_name}-{stage}.txt"
-            json_path = prompt_root / f"{base_name}-{stage}.json"
+            text_path = prompt_pack_text_path(prompt_root, cluster_id, budget, model, stage)
+            json_path = prompt_pack_json_path(prompt_root, cluster_id, budget, model, stage)
             text_path.write_text(prompt_text, encoding="utf-8")
             json_path.write_text(json.dumps(prompt_payload, indent=2, ensure_ascii=False), encoding="utf-8")
             bundle_payload["stages"][stage] = {
@@ -122,8 +122,8 @@ def prepare_prompt_pack(
             )
 
         # Backward-compatible alias for the original single-stage prompt pack.
-        propose_text_path = prompt_root / f"{base_name}-propose.txt"
-        propose_json_path = prompt_root / f"{base_name}-propose.json"
+        propose_text_path = prompt_pack_text_path(prompt_root, cluster_id, budget, model, "propose")
+        propose_json_path = prompt_pack_json_path(prompt_root, cluster_id, budget, model, "propose")
         legacy_text_path = prompt_root / f"{base_name}.txt"
         legacy_json_path = prompt_root / f"{base_name}.json"
         legacy_text_path.write_text(propose_text_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -433,6 +433,18 @@ def artifact_descriptor_for_path(path: Path, kind: str, title: str, scope: str) 
 
 def sanitize_token(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
+
+
+def prompt_pack_base_name(cluster_id: str, budget: str, model: str) -> str:
+    return f"{cluster_id}-{sanitize_token(budget)}-{sanitize_token(model)}"
+
+
+def prompt_pack_text_path(prompt_root: Path, cluster_id: str, budget: str, model: str, stage: str) -> Path:
+    return prompt_root / f"{prompt_pack_base_name(cluster_id, budget, model)}-{stage}.txt"
+
+
+def prompt_pack_json_path(prompt_root: Path, cluster_id: str, budget: str, model: str, stage: str) -> Path:
+    return prompt_root / f"{prompt_pack_base_name(cluster_id, budget, model)}-{stage}.json"
 
 
 def most_common_text(values: list[str]) -> str | None:

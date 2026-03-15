@@ -12,7 +12,6 @@ from xml.etree import ElementTree as ET
 from .dashboard import write_executive_report
 from .learning import AnalysisProfile, load_profile
 from .models import (
-    ALLOWED_DATA_TYPES,
     AnalysisResult,
     ArtifactDescriptor,
     DiagnosticModel,
@@ -485,31 +484,6 @@ class Analyzer:
             sql = resolved.resolved_sql or query.raw_sql
             parameter_names = {parameter.name for parameter in query.parameters if parameter.name}
             referenced_parameters = set(PARAMETER_PATTERN.findall(sql))
-
-            for parameter in query.parameters:
-                if parameter.name and not parameter.name.startswith(":"):
-                    self._diagnostic(
-                        code="PARAMETER_PREFIX_INVALID",
-                        severity="error",
-                        message=f"Parameter {parameter.name} in {query.id} does not start with ':'.",
-                        source_path=query.source_path,
-                        query_id=query.id,
-                        tag="parameter",
-                        suggested_fix="Parameter names must start with ':', for example ':fPriceCheckRule'.",
-                    )
-                if parameter.data_type and parameter.data_type not in ALLOWED_DATA_TYPES:
-                    self._diagnostic(
-                        code="PARAMETER_DATATYPE_INVALID",
-                        severity="error",
-                        message=(
-                            f"Parameter {parameter.name or '<unnamed>'} in {query.id} uses unsupported "
-                            f"data_type {parameter.data_type}."
-                        ),
-                        source_path=query.source_path,
-                        query_id=query.id,
-                        tag="parameter",
-                        suggested_fix="Use one of Int, Double, String, DateTime, IntArray, StringArray, SQL.",
-                    )
 
             for placeholder in referenced_parameters:
                 if placeholder not in parameter_names:
