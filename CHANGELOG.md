@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0 - 2026-03-16
+
+- Added Java BFF phase-runtime commands for weak-model workflows: `invoke-java-bff`, `review-java-bff-response`, `merge-java-bff-phases`, and `generate-java-bff-skeleton`.
+- Added resumable Java BFF autonomous loop commands: `run-java-bff-loop`, `resume-java-bff-loop`, and `inspect-java-bff-loop`.
+- Added Java BFF phase review, merged implementation-plan, skeleton manifest, and skeleton handoff README artifacts.
+- Added Java Spring Boot skeleton generation for repository, service, controller, and DTO files driven by accepted phase outputs.
+- Added Java BFF loop completion tracking so the loop stops only after required review, merge, and skeleton artifacts are complete or a clear stop condition is reached.
+- Expanded dashboard and artifact catalog coverage for Java BFF reviews, merged plans, skeleton bundles, and loop state.
+- Added tests covering Java BFF review/merge/skeleton workflow and autonomous loop completion with a fake runner.
+
 ## 1.2.0 - 2026-03-16
 
 - Added `prepare-java-bff` to analyze SQL XML and emit weak-model-friendly Java Spring Boot BFF artifacts for Oracle 19c.

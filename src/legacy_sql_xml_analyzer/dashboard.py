@@ -160,6 +160,7 @@ def build_executive_summary(
     evolution_summary = evolution_summary or build_evolution_summary(output_dir)
     profile_lifecycle = build_profile_lifecycle_summary(profile_path)
     agent_loop_summary = build_agent_loop_summary(output_dir)
+    java_bff_summary = build_java_bff_summary(output_dir)
     snapshot_count = trend_summary["snapshot_count"]
 
     complexity_rows = [
@@ -186,6 +187,7 @@ def build_executive_summary(
         file_diagnostics=file_diagnostics,
         evolution_summary=evolution_summary,
         agent_loop_summary=agent_loop_summary,
+        java_bff_summary=java_bff_summary,
     )
     next_actions = build_next_actions(
         profile_path=profile_path,
@@ -195,6 +197,7 @@ def build_executive_summary(
         result=result,
         evolution_summary=evolution_summary,
         agent_loop_summary=agent_loop_summary,
+        java_bff_summary=java_bff_summary,
     )
 
     return {
@@ -237,6 +240,7 @@ def build_executive_summary(
         },
         "evolution_summary": evolution_summary,
         "agent_loop_summary": agent_loop_summary,
+        "java_bff_summary": java_bff_summary,
         "profile_lifecycle": profile_lifecycle,
         "next_actions": next_actions,
     }
@@ -312,6 +316,7 @@ def build_management_summary(
     file_diagnostics: Counter[str],
     evolution_summary: dict[str, Any],
     agent_loop_summary: dict[str, Any],
+    java_bff_summary: dict[str, Any],
 ) -> list[str]:
     resolved_queries = sum(1 for item in result.resolved_queries if item.status == "resolved")
     total_queries = len(result.resolved_queries)
@@ -347,6 +352,12 @@ def build_management_summary(
             f"Autonomous agent loop is {agent_loop_summary['status']} at phase "
             f"{agent_loop_summary['current_phase'] or 'n/a'} after {agent_loop_summary['iteration_count']} iteration(s)."
         )
+    if java_bff_summary.get("available"):
+        summary.append(
+            f"Java BFF pack has {java_bff_summary['bundle_count']} bundle(s), "
+            f"{java_bff_summary['accepted_review_count']} accepted review(s), and "
+            f"{java_bff_summary['skeleton_bundle_count']} skeleton bundle(s)."
+        )
     return summary
 
 
@@ -358,6 +369,7 @@ def build_next_actions(
     result: AnalysisResult,
     evolution_summary: dict[str, Any],
     agent_loop_summary: dict[str, Any],
+    java_bff_summary: dict[str, Any],
 ) -> list[str]:
     actions: list[str] = []
     if result.diagnostics:
@@ -388,6 +400,14 @@ def build_next_actions(
         actions.append(
             f"Close the remaining {agent_loop_summary['missing_artifact_count']} required autonomous-loop artifact(s) "
             "before treating the run as fully packaged."
+        )
+    if java_bff_summary.get("available") and java_bff_summary.get("missing_merge_count", 0) > 0:
+        actions.append(
+            f"Complete the remaining {java_bff_summary['missing_merge_count']} Java BFF merged plan(s) before code skeleton generation."
+        )
+    if java_bff_summary.get("available") and java_bff_summary.get("missing_skeleton_count", 0) > 0:
+        actions.append(
+            f"Generate the remaining {java_bff_summary['missing_skeleton_count']} Java BFF skeleton bundle(s) so implementation handoff is complete."
         )
     if profile_path is None:
         actions.append("Run the learn -> infer-rules -> freeze-profile workflow to reduce repetitive resolution failures.")
@@ -782,6 +802,71 @@ def build_agent_loop_summary(output_dir: Path) -> dict[str, Any]:
     }
 
 
+def build_java_bff_summary(output_dir: Path) -> dict[str, Any]:
+    java_root = output_dir / "analysis" / "java_bff"
+    overview = load_json_payload(java_root / "overview.json")
+    if not overview:
+        return {
+            "available": False,
+            "bundle_count": 0,
+            "accepted_review_count": 0,
+            "needs_revision_review_count": 0,
+            "merged_bundle_count": 0,
+            "skeleton_bundle_count": 0,
+            "missing_merge_count": 0,
+            "missing_skeleton_count": 0,
+            "loop_status": None,
+            "bundles": [],
+        }
+
+    reviews_root = java_root / "reviews"
+    review_rows: list[dict[str, Any]] = []
+    if reviews_root.exists():
+        for review_path in sorted(reviews_root.glob("*/*-review.json")):
+            payload = load_json_payload(review_path)
+            if payload:
+                review_rows.append(payload)
+
+    bundles = overview.get("bundles", [])
+    if not isinstance(bundles, list):
+        bundles = []
+    merged_bundle_count = 0
+    skeleton_bundle_count = 0
+    bundle_rows: list[dict[str, Any]] = []
+    for item in bundles:
+        if not isinstance(item, dict):
+            continue
+        bundle_id = str(item.get("bundle_id") or item.get("entry_query_id") or "unknown")
+        bundle_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", bundle_id)
+        merged_exists = (java_root / "merged" / bundle_slug / "implementation_plan.json").exists()
+        skeleton_exists = (java_root / "skeletons" / bundle_slug / "README.md").exists()
+        merged_bundle_count += 1 if merged_exists else 0
+        skeleton_bundle_count += 1 if skeleton_exists else 0
+        bundle_rows.append(
+            {
+                "bundle_id": bundle_id,
+                "query_count": int(item.get("query_count", 0) or 0),
+                "prompt_count": int(item.get("prompt_count", 0) or 0),
+                "merged": merged_exists,
+                "skeleton": skeleton_exists,
+            }
+        )
+
+    loop_payload = load_json_payload(java_root / "loop" / "completion_report.json")
+    return {
+        "available": True,
+        "bundle_count": len(bundle_rows),
+        "accepted_review_count": sum(1 for item in review_rows if item.get("status") == "accepted"),
+        "needs_revision_review_count": sum(1 for item in review_rows if item.get("status") == "needs_revision"),
+        "merged_bundle_count": merged_bundle_count,
+        "skeleton_bundle_count": skeleton_bundle_count,
+        "missing_merge_count": max(len(bundle_rows) - merged_bundle_count, 0),
+        "missing_skeleton_count": max(len(bundle_rows) - skeleton_bundle_count, 0),
+        "loop_status": loop_payload.get("status"),
+        "bundles": bundle_rows[:10],
+    }
+
+
 def build_profile_lifecycle_summary(profile_path: Path | None) -> dict[str, Any]:
     if profile_path is None or not profile_path.exists():
         return {
@@ -862,6 +947,7 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
     headline = summary["headline"]
     evolution = summary["evolution_summary"]
     agent_loop = summary["agent_loop_summary"]
+    java_bff = summary["java_bff_summary"]
     lifecycle = summary["profile_lifecycle"]
     lines = [
         "# Executive Summary",
@@ -922,6 +1008,17 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
     else:
         lines.append("- No autonomous agent loop state is available for this run.")
 
+    lines.extend(["", "## Java BFF"])
+    if java_bff["available"]:
+        lines.append(
+            f"- Bundles: {java_bff['bundle_count']}, accepted reviews: {java_bff['accepted_review_count']}, "
+            f"merged bundles: {java_bff['merged_bundle_count']}, skeleton bundles: {java_bff['skeleton_bundle_count']}."
+        )
+        if java_bff.get("loop_status"):
+            lines.append(f"- Java BFF loop status: `{java_bff['loop_status']}`")
+    else:
+        lines.append("- No Java Spring Boot BFF artifact pack is available for this run.")
+
     lines.extend(["", "## Profile Lifecycle"])
     if lifecycle["profile_status"]:
         lines.append(
@@ -943,6 +1040,7 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
     headline = summary["headline"]
     evolution = summary["evolution_summary"]
     agent_loop = summary["agent_loop_summary"]
+    java_bff = summary["java_bff_summary"]
     lifecycle = summary["profile_lifecycle"]
     management_cards = "".join(f"<li>{escape_html(item)}</li>" for item in summary["management_summary"])
     next_actions = "".join(f"<li>{escape_html(item)}</li>" for item in summary["next_actions"])
@@ -991,6 +1089,17 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
         f"{agent_loop['iteration_count']} iteration(s)."
         if agent_loop["available"]
         else "No autonomous agent loop state is available yet."
+    )
+    java_bff_rows = "".join(
+        f"<tr><td>{escape_html(item['bundle_id'])}</td><td>{item['query_count']}</td><td>{item['prompt_count']}</td>"
+        f"<td>{'yes' if item['merged'] else 'no'}</td><td>{'yes' if item['skeleton'] else 'no'}</td></tr>"
+        for item in java_bff["bundles"]
+    )
+    java_bff_summary = (
+        f"Java BFF packs: bundles={java_bff['bundle_count']}, accepted reviews={java_bff['accepted_review_count']}, "
+        f"merged={java_bff['merged_bundle_count']}, skeletons={java_bff['skeleton_bundle_count']}."
+        if java_bff["available"]
+        else "No Java BFF artifact pack is available yet."
     )
 
     return f"""<!DOCTYPE html>
@@ -1227,6 +1336,28 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
         <h2>Remaining Loop Gaps</h2>
         <p>{escape_html(agent_loop['stop_reason'] or 'Loop is still active or has no recorded stop reason.')}</p>
         <ul>{"".join(f"<li>{escape_html(item)}</li>" for item in agent_loop['missing_artifacts'][:8]) or "<li>No missing required artifacts</li>"}</ul>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="panel">
+        <h2>Java BFF</h2>
+        <p>{escape_html(java_bff_summary)}</p>
+        <div class="metric-grid">
+          <div class="metric"><strong>{java_bff['bundle_count']}</strong><span>Bundles</span></div>
+          <div class="metric"><strong>{java_bff['accepted_review_count']}</strong><span>Accepted Reviews</span></div>
+          <div class="metric"><strong>{java_bff['merged_bundle_count']}</strong><span>Merged</span></div>
+          <div class="metric"><strong>{java_bff['skeleton_bundle_count']}</strong><span>Skeletons</span></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Java BFF Bundle Status</h2>
+        <table>
+          <thead>
+            <tr><th>Bundle</th><th>Queries</th><th>Prompts</th><th>Merged</th><th>Skeleton</th></tr>
+          </thead>
+          <tbody>{java_bff_rows or '<tr><td colspan=\"5\">No Java BFF bundles yet</td></tr>'}</tbody>
+        </table>
       </div>
     </section>
 

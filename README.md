@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.2.0`
+Current local release: `v1.5.0`
 
 ## Usage
 
@@ -222,6 +222,37 @@ The Java BFF pack is specifically tuned for a weak 128k-token model:
 - feed one `phase-2-repository` chunk prompt at a time
 - use `phase-2-repository-merge` only after all chunk-level outputs are complete
 - if a query is `partial` or `failed`, treat diagnostics as blockers instead of asking the model to guess missing SQL
+
+Invoke one Java BFF phase pack against an OpenAI-compatible provider:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer invoke-java-bff --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/orders.xml_main_OrderSearch/phase-1-plan.json --provider-config ./provider.json --review
+```
+
+Review a saved Java BFF response, merge accepted phase outputs, and generate Java skeletons:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer review-java-bff-response --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/orders.xml_main_OrderSearch/phase-1-plan.json --response ./phase-1-plan.response.json
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer merge-java-bff-phases --analysis-root ./analysis-output --bundle-id orders.xml:main:OrderSearch
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer generate-java-bff-skeleton --analysis-root ./analysis-output --bundle-id orders.xml:main:OrderSearch --package-name com.example.legacybff
+```
+
+Run the autonomous Java BFF loop so Qwen3-style weak models can execute every phase until the required review, merge, and skeleton artifacts are complete:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer run-java-bff-loop --input ./xml --output ./analysis-output --runner-mode provider --provider-config ./provider.json --package-name com.example.legacybff
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer resume-java-bff-loop --output ./analysis-output
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer inspect-java-bff-loop --output ./analysis-output
+```
+
+The Java BFF loop adds:
+
+- `analysis/java_bff/reviews/*/*-review.json`: accepted or repair-needed phase reviews
+- `analysis/java_bff/merged/*/implementation_plan.json`: merged repository, BFF, and verification logic
+- `analysis/java_bff/skeletons/*/manifest.json`: emitted Java file manifest
+- `analysis/java_bff/skeletons/*/README.md`: handoff readme for the generated skeleton bundle
+- `analysis/java_bff/loop/loop_state.json`: resumable loop state
+- `analysis/java_bff/loop/completion_report.json`: final status with missing artifact tracking
 
 Collect accepted reviewed patches into a candidate profile:
 

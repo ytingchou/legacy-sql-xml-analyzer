@@ -13,6 +13,18 @@ from .evolution import (
     simulate_candidate_profile,
 )
 from .java_bff import prepare_java_bff_from_input
+from .java_bff_loop import (
+    JavaBffLoopConfig,
+    inspect_java_bff_loop,
+    resume_java_bff_loop,
+    run_java_bff_loop,
+)
+from .java_bff_workflow import (
+    generate_java_bff_skeleton,
+    invoke_java_bff_prompt,
+    merge_java_bff_phases,
+    review_java_bff_response_from_analysis,
+)
 from .lifecycle import grade_profile, promote_profile, rollback_profile
 from .llm_provider import invoke_llm_from_analysis
 from .learning import freeze_profile, infer_rules, learn_directory
@@ -229,6 +241,95 @@ def build_parser() -> argparse.ArgumentParser:
     java_bff_parser.add_argument("--entry-main-query", help="Optional main-query name to focus the Java BFF pack.")
     java_bff_parser.add_argument("--prompt-profile", default="qwen3-128k-java-bff", help="Prompt profile tuned for the target weak LLM.")
     java_bff_parser.add_argument("--max-sql-chunk-tokens", type=int, help="Optional SQL chunk token cap for phase-2 repository prompts.")
+
+    invoke_java_parser = subparsers.add_parser(
+        "invoke-java-bff",
+        help="Send a Java BFF phase prompt to an OpenAI-compatible provider and optionally review the response.",
+    )
+    invoke_java_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    invoke_java_parser.add_argument("--prompt-json", required=True, type=Path, help="Java BFF phase prompt JSON path.")
+    invoke_java_parser.add_argument("--provider-config", type=Path, help="Optional provider config for the OpenAI-compatible provider.")
+    invoke_java_parser.add_argument("--provider-base-url", help="Provider base URL or /v1 root.")
+    invoke_java_parser.add_argument("--provider-api-key", help="Provider API key.")
+    invoke_java_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY", help="Environment variable name for the provider API key.")
+    invoke_java_parser.add_argument("--provider-model", help="Provider model name.")
+    invoke_java_parser.add_argument("--provider-name", help="Optional provider label.")
+    invoke_java_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override.")
+    invoke_java_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
+    invoke_java_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
+    invoke_java_parser.add_argument("--review", action="store_true", help="Immediately run Java BFF review on the saved response text.")
+
+    review_java_parser = subparsers.add_parser(
+        "review-java-bff-response",
+        help="Review a Java BFF phase response against its phase schema and merge-safety rules.",
+    )
+    review_java_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    review_java_parser.add_argument("--prompt-json", required=True, type=Path, help="Java BFF phase prompt JSON path.")
+    review_java_parser.add_argument("--response", required=True, type=Path, help="Path to the LLM response text or JSON file.")
+
+    merge_java_parser = subparsers.add_parser(
+        "merge-java-bff-phases",
+        help="Merge accepted Java BFF phase reviews into repository, BFF, and verification plans.",
+    )
+    merge_java_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    merge_java_parser.add_argument("--bundle-id", required=True, help="Java BFF bundle id from overview.json.")
+
+    skeleton_java_parser = subparsers.add_parser(
+        "generate-java-bff-skeleton",
+        help="Generate Java Spring Boot skeleton files from a merged Java BFF implementation plan.",
+    )
+    skeleton_java_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    skeleton_java_parser.add_argument("--bundle-id", required=True, help="Java BFF bundle id from overview.json.")
+    skeleton_java_parser.add_argument("--package-name", default="com.example.legacybff", help="Java package name for generated skeleton files.")
+
+    java_loop_parser = subparsers.add_parser(
+        "run-java-bff-loop",
+        help="Run the autonomous Java BFF phase loop until merged plans and skeletons are complete or a stop condition is reached.",
+    )
+    java_loop_parser.add_argument("--input", required=True, type=Path, help="Input directory that contains XML files.")
+    java_loop_parser.add_argument("--output", required=True, type=Path, help="Output directory for analysis and Java BFF artifacts.")
+    java_loop_parser.add_argument("--profile", type=Path, help="Optional frozen or promoted profile JSON.")
+    java_loop_parser.add_argument("--prompt-profile", default="qwen3-128k-java-bff", help="Prompt profile tuned for the target weak LLM.")
+    java_loop_parser.add_argument("--max-iterations", type=int, default=64, help="Maximum Java BFF loop iterations before stopping.")
+    java_loop_parser.add_argument("--max-attempts-per-prompt", type=int, default=3, help="Maximum retries for a single Java BFF phase prompt.")
+    java_loop_parser.add_argument("--runner-mode", choices=["provider", "cline_bridge"], default="provider", help="Execution mode for Java BFF prompts.")
+    java_loop_parser.add_argument("--provider-config", type=Path, help="Optional provider config for provider mode.")
+    java_loop_parser.add_argument("--provider-base-url", help="Provider base URL or /v1 root.")
+    java_loop_parser.add_argument("--provider-api-key", help="Provider API key.")
+    java_loop_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY", help="Environment variable name for the provider API key.")
+    java_loop_parser.add_argument("--provider-model", help="Provider model name.")
+    java_loop_parser.add_argument("--provider-name", help="Optional provider label.")
+    java_loop_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override.")
+    java_loop_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
+    java_loop_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
+    java_loop_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge after writing each task file.")
+    java_loop_parser.add_argument("--package-name", default="com.example.legacybff", help="Java package name for generated skeleton files.")
+    java_loop_parser.add_argument("--entry-file", help="Optional XML filename to focus the Java BFF pack.")
+    java_loop_parser.add_argument("--entry-main-query", help="Optional main-query name to focus the Java BFF pack.")
+    java_loop_parser.add_argument("--max-sql-chunk-tokens", type=int, help="Optional SQL chunk token cap for phase-2 repository prompts.")
+
+    resume_java_loop_parser = subparsers.add_parser(
+        "resume-java-bff-loop",
+        help="Resume a previously started Java BFF autonomous loop from loop_state.json.",
+    )
+    resume_java_loop_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis/java_bff/loop/loop_state.json.")
+    resume_java_loop_parser.add_argument("--provider-config", type=Path, help="Optional provider config override.")
+    resume_java_loop_parser.add_argument("--provider-base-url", help="Optional provider base URL override.")
+    resume_java_loop_parser.add_argument("--provider-api-key", help="Optional provider API key override.")
+    resume_java_loop_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY", help="Environment variable name for the provider API key.")
+    resume_java_loop_parser.add_argument("--provider-model", help="Optional provider model override.")
+    resume_java_loop_parser.add_argument("--provider-name", help="Optional provider label override.")
+    resume_java_loop_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override.")
+    resume_java_loop_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
+    resume_java_loop_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
+    resume_java_loop_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge.")
+    resume_java_loop_parser.add_argument("--package-name", help="Optional package name override.")
+
+    inspect_java_loop_parser = subparsers.add_parser(
+        "inspect-java-bff-loop",
+        help="Inspect Java BFF loop state and history.",
+    )
+    inspect_java_loop_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis/java_bff/loop/loop_state.json.")
     return parser
 
 
@@ -537,6 +638,136 @@ def main(argv: list[str] | None = None) -> int:
             f"Prepared Java BFF artifacts with bundles={payload['summary']['bundle_count']} "
             f"chunks={payload['summary']['chunk_count']} prompts={payload['summary']['prompt_count']} "
             f"chunk_token_limit={payload['summary']['chunk_token_limit']}."
+        )
+        return 0
+
+    if args.command == "invoke-java-bff":
+        result = invoke_java_bff_prompt(
+            analysis_root=args.analysis_root.resolve(),
+            prompt_json_path=args.prompt_json.resolve(),
+            provider_config_path=args.provider_config.resolve() if args.provider_config else None,
+            provider_base_url=args.provider_base_url,
+            provider_api_key=args.provider_api_key,
+            provider_api_key_env=args.provider_api_key_env,
+            provider_model=args.provider_model,
+            provider_name=args.provider_name,
+            token_limit=args.token_limit,
+            temperature=args.temperature,
+            timeout_seconds=args.timeout_seconds,
+            review=args.review,
+        )
+        summary = result["run_summary"]
+        print(
+            f"Invoked Java BFF provider={summary['provider_name']} phase={summary['phase']} "
+            f"bundle={summary['bundle_id']} token_limit={summary['token_limit']}."
+        )
+        return 0
+
+    if args.command == "review-java-bff-response":
+        result = review_java_bff_response_from_analysis(
+            analysis_root=args.analysis_root.resolve(),
+            prompt_json_path=args.prompt_json.resolve(),
+            response_path=args.response.resolve(),
+        )
+        review = result["review"]
+        print(
+            f"Reviewed Java BFF phase={review['phase']} bundle={review['bundle_id']} "
+            f"status={review['status']} issues={len(review['issues'])}."
+        )
+        return 0
+
+    if args.command == "merge-java-bff-phases":
+        result = merge_java_bff_phases(
+            analysis_root=args.analysis_root.resolve(),
+            bundle_id=args.bundle_id,
+        )
+        payload = result["implementation_plan"]
+        print(
+            f"Merged Java BFF bundle={payload['bundle_id']} status={payload['status']} "
+            f"repository_queries={len(payload['repository_plan']['queries'])}."
+        )
+        return 0
+
+    if args.command == "generate-java-bff-skeleton":
+        result = generate_java_bff_skeleton(
+            analysis_root=args.analysis_root.resolve(),
+            bundle_id=args.bundle_id,
+            package_name=args.package_name,
+        )
+        print(
+            f"Generated Java BFF skeleton for bundle={args.bundle_id} "
+            f"artifact_count={len(result['artifacts'])}."
+        )
+        return 0
+
+    if args.command == "run-java-bff-loop":
+        config = JavaBffLoopConfig(
+            input_dir=args.input.resolve(),
+            output_dir=args.output.resolve(),
+            profile_path=args.profile.resolve() if args.profile else None,
+            prompt_profile=args.prompt_profile,
+            max_iterations=args.max_iterations,
+            max_attempts_per_prompt=args.max_attempts_per_prompt,
+            runner_mode=args.runner_mode,
+            provider_config_path=args.provider_config.resolve() if args.provider_config else None,
+            provider_base_url=args.provider_base_url,
+            provider_api_key=args.provider_api_key,
+            provider_api_key_env=args.provider_api_key_env,
+            provider_model=args.provider_model,
+            provider_name=args.provider_name,
+            token_limit=args.token_limit,
+            temperature=args.temperature,
+            timeout_seconds=args.timeout_seconds,
+            cline_bridge_command=args.cline_bridge_command,
+            package_name=args.package_name,
+            entry_file=args.entry_file,
+            entry_main_query=args.entry_main_query,
+            max_sql_chunk_tokens=args.max_sql_chunk_tokens,
+        )
+        payload = run_java_bff_loop(config)
+        print(
+            f"Java BFF loop finished with status={payload['status']} stop_reason={payload['stop_reason']} "
+            f"missing_artifacts={len(payload['missing_artifacts'])}."
+        )
+        return 0
+
+    if args.command == "resume-java-bff-loop":
+        inspection = inspect_java_bff_loop(args.output.resolve())
+        base_config = JavaBffLoopConfig.from_dict(inspection["state"]["config"])
+        if args.provider_config:
+            base_config.provider_config_path = args.provider_config.resolve()
+        if args.provider_base_url is not None:
+            base_config.provider_base_url = args.provider_base_url
+        if args.provider_api_key is not None:
+            base_config.provider_api_key = args.provider_api_key
+        if args.provider_api_key_env is not None:
+            base_config.provider_api_key_env = args.provider_api_key_env
+        if args.provider_model is not None:
+            base_config.provider_model = args.provider_model
+        if args.provider_name is not None:
+            base_config.provider_name = args.provider_name
+        if args.token_limit is not None:
+            base_config.token_limit = args.token_limit
+        if args.temperature is not None:
+            base_config.temperature = args.temperature
+        if args.timeout_seconds is not None:
+            base_config.timeout_seconds = args.timeout_seconds
+        if args.cline_bridge_command is not None:
+            base_config.cline_bridge_command = args.cline_bridge_command
+        if args.package_name is not None:
+            base_config.package_name = args.package_name
+        payload = resume_java_bff_loop(args.output.resolve(), config=base_config)
+        print(
+            f"Resumed Java BFF loop with status={payload['status']} stop_reason={payload['stop_reason']} "
+            f"missing_artifacts={len(payload['missing_artifacts'])}."
+        )
+        return 0
+
+    if args.command == "inspect-java-bff-loop":
+        payload = inspect_java_bff_loop(args.output.resolve())
+        print(
+            f"Java BFF loop status={payload['state']['status']} "
+            f"history_events={payload['history_count']}."
         )
         return 0
 

@@ -11,6 +11,7 @@ from typing import Any
 from .analyzer import analyze_directory
 from .models import AnalysisResult, ArtifactDescriptor, DiagnosticModel, ParameterModel, ResolvedQueryModel
 from .prompt_profiles import phase_budget_for
+from .prompting import resolve_analysis_root
 
 
 ORACLE_FEATURE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -47,6 +48,7 @@ BFF_PHASES = (
     "phase-3-bff-assembly",
     "phase-4-verify",
 )
+BFF_PHASE_ORDER = {phase: index for index, phase in enumerate(BFF_PHASES, start=1)}
 
 
 @dataclass(slots=True)
@@ -939,6 +941,7 @@ def build_bundle_payload(
     return {
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "bundle_id": entry_query.query.id,
+        "bundle_slug": safe_name(entry_query.query.id),
         "entry_query_id": entry_query.query.id,
         "entry_query_name": entry_query.query.name,
         "entry_file": str(entry_query.query.source_path),
@@ -1260,3 +1263,91 @@ def estimate_tokens(text: str) -> int:
 
 def safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+
+
+def resolve_java_bff_root(path: Path) -> Path:
+    analysis_root = resolve_analysis_root(path)
+    return analysis_root / "java_bff"
+
+
+def bundle_slug(bundle_id: str) -> str:
+    return safe_name(bundle_id)
+
+
+def bundle_root_for(analysis_root: Path, bundle_id: str) -> Path:
+    return resolve_java_bff_root(analysis_root) / "bundles" / bundle_slug(bundle_id)
+
+
+def bundle_phase_root_for(analysis_root: Path, bundle_id: str) -> Path:
+    return resolve_java_bff_root(analysis_root) / "phase_packs" / bundle_slug(bundle_id)
+
+
+def load_bundle_payload(analysis_root: Path, bundle_id: str) -> dict[str, Any]:
+    path = bundle_root_for(analysis_root, bundle_id) / "bundle.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid Java BFF bundle payload: {path}")
+    return payload
+
+
+def iter_bundle_payloads(analysis_root: Path) -> list[dict[str, Any]]:
+    bundles_root = resolve_java_bff_root(analysis_root) / "bundles"
+    if not bundles_root.exists():
+        return []
+    payloads: list[dict[str, Any]] = []
+    for path in sorted(bundles_root.glob("*/bundle.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def list_java_bff_bundles(path: Path) -> list[dict[str, Any]]:
+    return iter_bundle_payloads(path)
+
+
+def load_java_bff_bundle(path: Path, bundle_id: str) -> dict[str, Any]:
+    return load_bundle_payload(path, bundle_id)
+
+
+def load_phase_pack_payload(phase_pack_path: Path) -> dict[str, Any]:
+    payload = json.loads(phase_pack_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid Java BFF phase payload: {phase_pack_path}")
+    return payload
+
+
+def load_java_bff_prompt_payload(prompt_json_path: Path) -> dict[str, Any]:
+    return load_phase_pack_payload(prompt_json_path)
+
+
+def find_java_bff_prompt(
+    path: Path,
+    bundle_id: str,
+    phase: str,
+    query_id: str | None = None,
+    chunk_sequence: int | None = None,
+) -> Path:
+    bundle = load_java_bff_bundle(path, bundle_id)
+    candidates = [item for item in bundle.get("phase_prompts", []) if isinstance(item, dict) and item.get("phase") == phase]
+    if phase == "phase-2-repository-chunk":
+        if query_id is None or chunk_sequence is None:
+            raise ValueError("phase-2-repository-chunk requires query_id and chunk_sequence.")
+        query_slug = safe_name(query_id)
+        suffix = f"{query_slug}-phase-2-repository-{chunk_sequence:02d}.json"
+        for item in candidates:
+            if str(item.get("json_path", "")).endswith(suffix):
+                return Path(str(item["json_path"]))
+        raise FileNotFoundError(f"No Java BFF repository chunk prompt matched {query_id} chunk {chunk_sequence}.")
+    if phase == "phase-2-repository-merge":
+        if query_id is None:
+            raise ValueError("phase-2-repository-merge requires query_id.")
+        query_slug = safe_name(query_id)
+        suffix = f"{query_slug}-phase-2-repository-merge.json"
+        for item in candidates:
+            if str(item.get("json_path", "")).endswith(suffix):
+                return Path(str(item["json_path"]))
+        raise FileNotFoundError(f"No Java BFF repository merge prompt matched {query_id}.")
+    if len(candidates) != 1:
+        raise FileNotFoundError(f"Expected exactly one Java BFF prompt for phase {phase}, found {len(candidates)}.")
+    return Path(str(candidates[0]["json_path"]))
