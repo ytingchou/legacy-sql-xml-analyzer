@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 - 2026-03-15
+
+- Added `propose-rules` to collect accepted reviewed weak-LLM patch candidates and build a merged candidate profile.
+- Added `apply-profile-patch` so proposal bundles can be merged into a base profile without editing JSON by hand.
+- Added `simulate-profile` to validate a candidate profile against the XML corpus before promotion.
+- Added tests covering candidate profile generation, patch application, and simulation improvements.
+
 ## 0.7.0 - 2026-03-15
 
 - Added staged weak-LLM prompt packs so each failure cluster now emits `classify`, `propose`, and `verify` prompts instead of a single monolithic ask.

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .analyzer import append_artifacts_to_index
-from .learning import AnalysisProfile, load_profile
+from .learning import AnalysisProfile, ProfileRule, load_profile
 from .prompting import (
     PROMPT_STAGES,
     answer_schema_for_cluster,
@@ -705,3 +705,375 @@ def issue(code: str, severity: str, message: str, field: str | None = None) -> d
         "message": message,
         "field": field,
     }
+
+
+def propose_rules_from_analysis(
+    analysis_root: Path,
+    profile_path: Path | None = None,
+    min_confidence: float = 0.7,
+    include_needs_review: bool = False,
+) -> dict[str, Any]:
+    analysis_root = resolve_analysis_root(analysis_root)
+    base_profile = load_profile(profile_path) if profile_path else None
+    proposals_root = analysis_root / "proposals"
+    proposals_root.mkdir(parents=True, exist_ok=True)
+
+    accepted_candidates, skipped_reviews = collect_patch_candidates(
+        analysis_root=analysis_root,
+        min_confidence=min_confidence,
+        include_needs_review=include_needs_review,
+    )
+    merged_profile = merge_patch_candidates(base_profile, accepted_candidates)
+
+    proposal_payload = {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "analysis_root": str(analysis_root),
+        "profile_source": str(profile_path.resolve()) if profile_path else None,
+        "min_confidence": min_confidence,
+        "include_needs_review": include_needs_review,
+        "summary": {
+            "accepted_patch_count": len(accepted_candidates),
+            "skipped_review_count": len(skipped_reviews),
+            "base_rule_count": len(base_profile.rules) if base_profile else 0,
+            "candidate_rule_count": len(merged_profile.rules),
+        },
+        "accepted_patches": accepted_candidates,
+        "skipped_reviews": skipped_reviews,
+    }
+
+    proposals_json_path = proposals_root / "rule_proposals.json"
+    proposals_md_path = proposals_root / "rule_proposals.md"
+    candidate_profile_path = proposals_root / "candidate_profile.json"
+    candidate_profile_md_path = proposals_root / "candidate_profile.md"
+
+    proposals_json_path.write_text(json.dumps(proposal_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    proposals_md_path.write_text(render_rule_proposals_markdown(proposal_payload), encoding="utf-8")
+    candidate_profile_path.write_text(json.dumps(merged_profile.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    candidate_profile_md_path.write_text(render_candidate_profile_markdown(merged_profile, proposal_payload), encoding="utf-8")
+
+    artifacts = [
+        artifact_descriptor_for_path(proposals_json_path, "json", "Rule proposals", "proposal"),
+        artifact_descriptor_for_path(proposals_md_path, "markdown", "Rule proposals summary", "proposal"),
+        artifact_descriptor_for_path(candidate_profile_path, "json", "Candidate profile", "profile"),
+        artifact_descriptor_for_path(candidate_profile_md_path, "markdown", "Candidate profile summary", "profile"),
+    ]
+    append_artifacts_to_index(analysis_root.parent, artifacts)
+    return {
+        "proposal_payload": proposal_payload,
+        "candidate_profile": merged_profile,
+        "candidate_profile_path": candidate_profile_path,
+        "artifacts": artifacts,
+    }
+
+
+def apply_profile_patch_bundle(
+    patch_bundle_path: Path,
+    output_path: Path,
+    profile_path: Path | None = None,
+) -> AnalysisProfile:
+    payload = json.loads(patch_bundle_path.read_text(encoding="utf-8"))
+    accepted_candidates = [item for item in payload.get("accepted_patches", []) if isinstance(item, dict)]
+    base_profile = load_profile(profile_path) if profile_path else None
+    merged_profile = merge_patch_candidates(base_profile, accepted_candidates)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(merged_profile.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    return merged_profile
+
+
+def simulate_candidate_profile(
+    input_dir: Path,
+    output_dir: Path,
+    analysis_root: Path | None = None,
+    candidate_profile_path: Path | None = None,
+    entry_file: str | None = None,
+    entry_main_query: str | None = None,
+) -> dict[str, Any]:
+    if candidate_profile_path is None:
+        if analysis_root is None:
+            raise ValueError("Either analysis_root or candidate_profile_path must be provided.")
+        analysis_root = resolve_analysis_root(analysis_root)
+        candidate_profile_path = analysis_root / "proposals" / "candidate_profile.json"
+    if not candidate_profile_path.exists():
+        raise ValueError(f"Candidate profile does not exist: {candidate_profile_path}")
+
+    from .validation import validate_profile
+
+    validation_result = validate_profile(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        profile_path=candidate_profile_path,
+        entry_file=entry_file,
+        entry_main_query=entry_main_query,
+    )
+
+    simulation_root = output_dir / "simulation"
+    simulation_root.mkdir(parents=True, exist_ok=True)
+    simulation_json_path = simulation_root / "profile_simulation.json"
+    simulation_md_path = simulation_root / "profile_simulation.md"
+    payload = {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "candidate_profile_path": str(candidate_profile_path.resolve()),
+        "assessment": validation_result["assessment"],
+        "validation_payload": validation_result["payload"],
+    }
+    simulation_json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    simulation_md_path.write_text(render_profile_simulation_markdown(payload), encoding="utf-8")
+    artifacts = [
+        artifact_descriptor_for_path(simulation_json_path, "json", "Profile simulation report", "validation"),
+        artifact_descriptor_for_path(simulation_md_path, "markdown", "Profile simulation summary", "validation"),
+    ]
+    return {
+        "assessment": validation_result["assessment"],
+        "payload": payload,
+        "artifacts": validation_result["artifacts"] + artifacts,
+    }
+
+
+def collect_patch_candidates(
+    analysis_root: Path,
+    min_confidence: float = 0.7,
+    include_needs_review: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    review_root = resolve_analysis_root(analysis_root) / "llm_reviews"
+    if not review_root.exists():
+        return [], []
+
+    accepted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for review_path in sorted(review_root.glob("*-review.json")):
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        review_stage = review.get("stage")
+        review_status = review.get("status")
+        safe_candidate = bool(review.get("safe_to_apply_candidate"))
+        patch_candidate = review.get("profile_patch_candidate")
+
+        if review_stage != "propose":
+            skipped.append(build_skipped_review(review_path, review, "stage_not_propose"))
+            continue
+        if review_status != "accepted":
+            if include_needs_review and review_status == "needs_revision":
+                skipped.append(build_skipped_review(review_path, review, "needs_revision_included_for_manual_review"))
+            else:
+                skipped.append(build_skipped_review(review_path, review, f"status_{review_status}"))
+            continue
+        if not safe_candidate or not isinstance(patch_candidate, dict):
+            skipped.append(build_skipped_review(review_path, review, "not_safe_or_missing_patch_candidate"))
+            continue
+
+        confidence_score = float(patch_candidate.get("confidence_score", 0.0))
+        if confidence_score < min_confidence:
+            skipped.append(build_skipped_review(review_path, review, "below_min_confidence"))
+            continue
+
+        dedupe_key = json.dumps(
+            {
+                "rule_type": patch_candidate.get("rule_type"),
+                "scope": patch_candidate.get("scope"),
+                "proposed_action": patch_candidate.get("proposed_action"),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        if dedupe_key in seen_keys:
+            skipped.append(build_skipped_review(review_path, review, "duplicate_patch_candidate"))
+            continue
+        seen_keys.add(dedupe_key)
+
+        accepted.append(
+            {
+                "review_path": str(review_path),
+                "cluster_id": review.get("cluster_id"),
+                "confidence_score": confidence_score,
+                "patch_candidate": patch_candidate,
+            }
+        )
+    accepted.sort(key=lambda item: (-float(item["confidence_score"]), item["cluster_id"] or ""))
+    return accepted, skipped
+
+
+def merge_patch_candidates(
+    base_profile: AnalysisProfile | None,
+    accepted_candidates: list[dict[str, Any]],
+) -> AnalysisProfile:
+    merged = clone_profile(base_profile)
+    merged.generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    if base_profile is not None:
+        merged.profile_version = base_profile.profile_version + 1
+
+    existing_rule_keys = {
+        canonical_rule_key(rule.rule_type, rule.proposed_action)
+        for rule in merged.rules
+    }
+    for item in accepted_candidates:
+        patch_candidate = item.get("patch_candidate", {})
+        rule_type = str(patch_candidate.get("rule_type", "")).strip()
+        proposed_action = patch_candidate.get("proposed_action", {})
+        if not rule_type or not isinstance(proposed_action, dict):
+            continue
+
+        apply_patch_action(merged, rule_type, proposed_action)
+
+        rule_key = canonical_rule_key(rule_type, proposed_action)
+        if rule_key in existing_rule_keys:
+            continue
+        existing_rule_keys.add(rule_key)
+        merged.rules.append(
+            ProfileRule(
+                rule_id=str(patch_candidate.get("rule_id", f"candidate-{sanitize_token(rule_type)}")),
+                rule_type=rule_type,
+                description=str(patch_candidate.get("description", f"Candidate {rule_type} rule")),
+                confidence=float(patch_candidate.get("confidence_score", 0.7)),
+                evidence=dict(patch_candidate.get("evidence", {})),
+                proposed_action=proposed_action,
+            )
+        )
+
+    merged.reference_token_patterns = dedupe_strings(merged.reference_token_patterns, seed=["{name}"])
+    merged.ignore_tags = dedupe_strings(merged.ignore_tags)
+    return merged
+
+
+def build_skipped_review(review_path: Path, review: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "review_path": str(review_path),
+        "cluster_id": review.get("cluster_id"),
+        "stage": review.get("stage"),
+        "status": review.get("status"),
+        "reason": reason,
+    }
+
+
+def clone_profile(profile: AnalysisProfile | None) -> AnalysisProfile:
+    if profile is None:
+        return AnalysisProfile(generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+    return AnalysisProfile.from_dict(profile.to_dict())
+
+
+def canonical_rule_key(rule_type: str, proposed_action: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "rule_type": rule_type,
+            "proposed_action": proposed_action,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+def apply_patch_action(profile: AnalysisProfile, rule_type: str, action: dict[str, Any]) -> None:
+    if rule_type == "external_xml_name_mapping":
+        profile.external_xml_name_map[str(action["xml_name"])] = str(action["mapped_to"])
+    elif rule_type == "external_xml_scoped_mapping":
+        scoped_key = f"{action['source_dir']}::{action['xml_name']}"
+        profile.external_xml_scoped_map[scoped_key] = str(action["mapped_to"])
+    elif rule_type == "reference_token_pattern":
+        pattern = str(action["pattern"])
+        if "{name}" in pattern:
+            profile.reference_token_patterns.append(pattern)
+    elif rule_type == "reference_target_default_order":
+        profile.reference_target_default_order = [
+            item for item in action.get("reference_target_default_order", []) if item in {"sub", "main"}
+        ] or ["sub", "main"]
+    elif rule_type == "ignore_tag":
+        profile.ignore_tags.append(str(action["tag"]))
+
+
+def dedupe_strings(values: list[str], seed: list[str] | None = None) -> list[str]:
+    ordered = list(seed or [])
+    seen = set(ordered)
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+def render_rule_proposals_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Rule Proposals",
+        "",
+        "## Summary",
+        f"- Accepted patches: {payload['summary']['accepted_patch_count']}",
+        f"- Skipped reviews: {payload['summary']['skipped_review_count']}",
+        f"- Base rules: {payload['summary']['base_rule_count']}",
+        f"- Candidate rules: {payload['summary']['candidate_rule_count']}",
+        "",
+        "## Accepted Patches",
+    ]
+    accepted = payload.get("accepted_patches", [])
+    if accepted:
+        for item in accepted:
+            patch = item["patch_candidate"]
+            lines.append(
+                f"- `{patch['rule_type']}` cluster={item['cluster_id']} confidence={item['confidence_score']:.2f}"
+            )
+            lines.append(f"  action: {json.dumps(patch['proposed_action'], ensure_ascii=False)}")
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Skipped Reviews"])
+    skipped = payload.get("skipped_reviews", [])
+    if skipped:
+        for item in skipped[:20]:
+            lines.append(
+                f"- cluster={item.get('cluster_id') or 'n/a'} stage={item.get('stage') or 'n/a'} "
+                f"status={item.get('status') or 'n/a'} reason={item['reason']}"
+            )
+    else:
+        lines.append("- None")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_candidate_profile_markdown(profile: AnalysisProfile, payload: dict[str, Any]) -> str:
+    lines = [
+        "# Candidate Profile",
+        "",
+        "## Summary",
+        f"- Profile version: {profile.profile_version}",
+        f"- Rules: {len(profile.rules)}",
+        f"- Reference target order: {', '.join(profile.reference_target_default_order)}",
+        f"- Token patterns: {', '.join(profile.reference_token_patterns)}",
+        f"- External XML aliases: {len(profile.external_xml_name_map)}",
+        f"- Scoped XML aliases: {len(profile.external_xml_scoped_map)}",
+        f"- Ignore tags: {', '.join(profile.ignore_tags) or 'none'}",
+        "",
+        "## Accepted Patches Applied",
+    ]
+    accepted = payload.get("accepted_patches", [])
+    if accepted:
+        for item in accepted:
+            patch = item["patch_candidate"]
+            lines.append(f"- `{patch['rule_type']}`: {json.dumps(patch['proposed_action'], ensure_ascii=False)}")
+    else:
+        lines.append("- None")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_profile_simulation_markdown(payload: dict[str, Any]) -> str:
+    assessment = payload["assessment"]
+    validation_payload = payload["validation_payload"]
+    lines = [
+        "# Profile Simulation",
+        "",
+        "## Summary",
+        f"- Candidate profile: `{payload['candidate_profile_path']}`",
+        f"- Classification: `{assessment['classification']}`",
+        f"- Recommendation: {assessment['recommendation']}",
+        "",
+        "## Improvements",
+    ]
+    improvements = assessment.get("improvements", [])
+    if improvements:
+        for item in improvements:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Delta Snapshot"])
+    delta = validation_payload.get("delta", {})
+    lines.append(f"- Resolved query delta: {delta.get('resolved_queries_delta', 0):+d}")
+    lines.append(f"- Failed query delta: {delta.get('failed_queries_delta', 0):+d}")
+    lines.append(f"- Error delta: {delta.get('error_delta', 0):+d}")
+    lines.append(f"- Warning delta: {delta.get('warning_delta', 0):+d}")
+    return "\n".join(lines).rstrip() + "\n"

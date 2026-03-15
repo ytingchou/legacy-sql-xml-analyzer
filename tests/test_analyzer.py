@@ -12,7 +12,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from legacy_sql_xml_analyzer.analyzer import analyze_directory
-from legacy_sql_xml_analyzer.evolution import review_llm_response_from_analysis
+from legacy_sql_xml_analyzer.evolution import (
+    apply_profile_patch_bundle,
+    propose_rules_from_analysis,
+    review_llm_response_from_analysis,
+    simulate_candidate_profile,
+)
 from legacy_sql_xml_analyzer.learning import freeze_profile, infer_rules, learn_directory
 from legacy_sql_xml_analyzer.prompting import prepare_prompt_pack_from_analysis
 from legacy_sql_xml_analyzer.validation import validate_profile
@@ -610,6 +615,177 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             self.assertIn("Prior stage response to reuse:", verify_prompt)
             self.assertTrue(
                 any(item["path"].endswith("reference_target_missing-propose-review.json") for item in index_payload["artifacts"])
+            )
+
+    def test_propose_rules_and_apply_patch_bundle_generate_candidate_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            response_path = root / "response.json"
+            merged_profile_path = root / "profiles" / "merged_profile.json"
+            input_dir.mkdir()
+
+            (input_dir / "shared-query.xml").write_text(
+                """<sql-mapping>
+  <main-query name="SharedMain">
+    <sql-body><![CDATA[
+      select * from shared_table
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "consumer.xml").write_text(
+                """<sql-mapping>
+  <main-query name="ConsumerMain">
+    <ext-sql-refer-to name="__EXT__" xml="shared" main-query="SharedMain" />
+    <sql-body><![CDATA[
+      select * from dual __EXT__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir)
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "cluster_id": "reference_target_missing",
+                        "problem_type": "mapping_inference",
+                        "root_cause": "The alias shared should map to shared-query.xml.",
+                        "proposed_change_type": "profile_rule",
+                        "proposed_rule_or_fix": {
+                            "rule_type": "external_xml_name_mapping",
+                            "scope": "global",
+                            "payload": {
+                                "xml_name": "shared",
+                                "mapped_to": "shared-query.xml",
+                            },
+                        },
+                        "confidence": "high",
+                        "why": ["The alias is consistent across the observed failure cluster."],
+                        "verification_steps": ["Run analyze with the candidate profile."],
+                        "risks": ["Another module could reuse the alias differently."],
+                        "insufficient_evidence": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            review_llm_response_from_analysis(
+                analysis_root=output_dir,
+                cluster_id="reference_target_missing",
+                response_path=response_path,
+                stage="propose",
+            )
+
+            proposal_result = propose_rules_from_analysis(analysis_root=output_dir, min_confidence=0.7)
+            candidate_profile_path = proposal_result["candidate_profile_path"]
+            proposal_payload = proposal_result["proposal_payload"]
+
+            self.assertEqual(1, proposal_payload["summary"]["accepted_patch_count"])
+            self.assertTrue(candidate_profile_path.exists())
+            candidate_profile_payload = json.loads(candidate_profile_path.read_text(encoding="utf-8"))
+            self.assertEqual("shared-query.xml", candidate_profile_payload["external_xml_name_map"]["shared"])
+
+            merged_profile = apply_profile_patch_bundle(
+                patch_bundle_path=output_dir / "analysis" / "proposals" / "rule_proposals.json",
+                output_path=merged_profile_path,
+            )
+            self.assertIn("shared", merged_profile.external_xml_name_map)
+
+            healed = analyze_directory(
+                input_dir=input_dir,
+                output_dir=root / "healed-output",
+                profile_path=merged_profile_path,
+            )
+            healed_codes = {diagnostic.code for diagnostic in healed.diagnostics}
+            self.assertNotIn("REFERENCE_TARGET_MISSING", healed_codes)
+
+    def test_simulate_candidate_profile_reports_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            simulation_output_dir = root / "simulation-output"
+            response_path = root / "response.json"
+            input_dir.mkdir()
+
+            (input_dir / "shared-query.xml").write_text(
+                """<sql-mapping>
+  <main-query name="SharedMain">
+    <sql-body><![CDATA[
+      select * from shared_table
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "consumer.xml").write_text(
+                """<sql-mapping>
+  <main-query name="ConsumerMain">
+    <ext-sql-refer-to name="__EXT__" xml="shared" main-query="SharedMain" />
+    <sql-body><![CDATA[
+      select * from dual __EXT__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir)
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "cluster_id": "reference_target_missing",
+                        "problem_type": "mapping_inference",
+                        "root_cause": "The alias shared should map to shared-query.xml.",
+                        "proposed_change_type": "profile_rule",
+                        "proposed_rule_or_fix": {
+                            "rule_type": "external_xml_name_mapping",
+                            "scope": "global",
+                            "payload": {
+                                "xml_name": "shared",
+                                "mapped_to": "shared-query.xml",
+                            },
+                        },
+                        "confidence": "high",
+                        "why": ["The alias is consistent across the observed failure cluster."],
+                        "verification_steps": ["Run analyze with the candidate profile."],
+                        "risks": ["Another module could reuse the alias differently."],
+                        "insufficient_evidence": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            review_llm_response_from_analysis(
+                analysis_root=output_dir,
+                cluster_id="reference_target_missing",
+                response_path=response_path,
+                stage="propose",
+            )
+            propose_rules_from_analysis(analysis_root=output_dir, min_confidence=0.7)
+
+            simulation_result = simulate_candidate_profile(
+                input_dir=input_dir,
+                output_dir=simulation_output_dir,
+                analysis_root=output_dir,
+            )
+
+            self.assertEqual("improved", simulation_result["assessment"]["classification"])
+            simulation_payload = json.loads(
+                (simulation_output_dir / "simulation" / "profile_simulation.json").read_text(encoding="utf-8")
+            )
+            self.assertGreater(
+                simulation_payload["validation_payload"]["delta"]["resolved_queries_delta"],
+                0,
             )
 
 
