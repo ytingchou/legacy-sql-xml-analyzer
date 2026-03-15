@@ -6,6 +6,7 @@
 - Added lifecycle sidecar artifacts (`*.history.json` and `*.history.md`) for promoted and rolled-back profiles.
 - Added rollback recommendations to `grade-profile` output when a regressed profile still has a recoverable parent profile.
 - Added `analysis/evolution_summary.*`, `analysis/prompt_scoreboard.*`, `analysis/evolution_console.html`, `analysis/llm_effectiveness.csv`, and `analysis/profile_lifecycle.csv`.
+- Added `analysis/llm_runs/index.json` so repeated provider runs can be aggregated without rescanning every run directory.
 - Added `analysis/schema/artifact_catalog.*` so humans, automation, and weaker LLMs can rely on stable artifact contracts.
 - Expanded the executive dashboard with LLM evolution, provider scoreboard, and profile lifecycle sections.
 - Added tests covering rollback behavior, lifecycle history artifacts, and automatic evolution report generation.

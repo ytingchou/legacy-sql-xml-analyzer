@@ -75,6 +75,7 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/llm_runs/*/response.json`: raw provider responses
 - `analysis/llm_runs/*/response.txt`: extracted assistant text responses
 - `analysis/llm_runs/*/run_summary.json`: saved provider, model, token-limit, and usage metadata
+- `analysis/llm_runs/index.json`: aggregated weak-LLM run history used by the evolution scoreboard
 - `analysis/proposals/rule_proposals.json`: accepted patch candidates collected from reviewed weak-LLM answers
 - `analysis/proposals/candidate_profile.json`: merged candidate profile generated from accepted patch candidates
 - `grade/profile_grade.json`: lifecycle grading for a candidate or promoted profile
