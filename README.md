@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v0.5.0`
+Current local release: `v0.6.0`
 
 ## Usage
 
@@ -56,6 +56,10 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/executive_value.csv`: spreadsheet-ready value hotspot export
 - `analysis/executive_diagnostics.csv`: spreadsheet-ready diagnostic hotspot export
 - `analysis/executive_trend.csv`: spreadsheet-ready run trend export
+- `analysis/failure_clusters.json`: grouped diagnostic families for repeated issues
+- `analysis/failure_clusters.md`: human-readable failure family summary
+- `analysis/prompt_packs/*.txt`: weak-LLM prompt packs for top failure clusters
+- `analysis/prompt_packs/*.json`: prompt metadata and expected answer schema
 
 Validate whether a frozen profile is actually helping:
 
@@ -72,6 +76,12 @@ Serve the generated dashboard locally:
 
 ```bash
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer serve-report --root ./analysis-output --port 8000
+```
+
+Generate or regenerate a prompt pack for a specific failure cluster:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer prepare-prompt --analysis-root ./analysis-output --cluster reference_target_missing --budget 32k --model weak-128k
 ```
 
 If you keep reusing the same `--output` directory across runs, the executive dashboard will also show trend direction and recent snapshot comparisons.

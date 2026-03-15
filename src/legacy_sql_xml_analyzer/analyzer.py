@@ -23,6 +23,7 @@ from .models import (
     ResolvedQueryModel,
 )
 from .profile import resolve_external_xml_path
+from .prompting import write_failure_clusters
 
 
 PARAMETER_PATTERN = re.compile(r":[A-Za-z_][A-Za-z0-9_]*")
@@ -914,6 +915,12 @@ def analyze_directory(
     )
     result.artifacts.extend(executive_artifacts)
     append_artifacts_to_index(output_dir, executive_artifacts)
+    prompting_artifacts = write_failure_clusters(
+        output_dir=output_dir,
+        result=result,
+    )
+    result.artifacts.extend(prompting_artifacts)
+    append_artifacts_to_index(output_dir, prompting_artifacts)
     return result
 
 

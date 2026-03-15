@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-03-15
+
+- Added failure clustering so repeated diagnostics are grouped into reusable issue families.
+- Added weak-LLM prompt pack generation with single-task prompts, compact evidence, and fixed JSON answer schemas.
+- Added `prepare-prompt` so a specific failure cluster can be repackaged for a chosen token budget and model profile.
+- Added tests covering failure cluster generation and prompt-pack output.
+
 ## 0.5.0 - 2026-03-15
 
 - Added trend-aware executive reporting that reads repeated run snapshots and summarizes whether quality is improving, stable, or regressing.

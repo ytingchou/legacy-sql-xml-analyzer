@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .analyzer import analyze_directory
 from .learning import freeze_profile, infer_rules, learn_directory
+from .prompting import prepare_prompt_pack_from_analysis
 from .validation import validate_profile
 from .web import serve_report
 
@@ -56,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--root", required=True, type=Path, help="Output directory that contains analysis/dashboard.html.")
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind.")
     serve_parser.add_argument("--port", type=int, default=8000, help="Port to bind the local HTTP server.")
+
+    prompt_parser = subparsers.add_parser("prepare-prompt", help="Generate a weak-LLM prompt pack for a failure cluster.")
+    prompt_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory or analysis directory that contains failure_clusters.json.")
+    prompt_parser.add_argument("--cluster", required=True, help="cluster_id from failure_clusters.json.")
+    prompt_parser.add_argument("--budget", default="128k", choices=["8k", "32k", "128k"], help="Target prompt budget.")
+    prompt_parser.add_argument("--model", default="weak-128k", help="Descriptive model profile label for the pack.")
     return parser
 
 
@@ -129,6 +136,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve-report":
         serve_report(root=args.root.resolve(), host=args.host, port=args.port)
+        return 0
+
+    if args.command == "prepare-prompt":
+        result = prepare_prompt_pack_from_analysis(
+            analysis_root=args.analysis_root.resolve(),
+            cluster_id=args.cluster,
+            budget=args.budget,
+            model=args.model,
+        )
+        print(
+            f"Prepared prompt pack for cluster={result['cluster']['cluster_id']}, "
+            f"generated {len(result['artifacts'])} artifact(s)."
+        )
         return 0
 
     parser.error(f"Unsupported command: {args.command}")

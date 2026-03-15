@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 
 from legacy_sql_xml_analyzer.analyzer import analyze_directory
 from legacy_sql_xml_analyzer.learning import freeze_profile, infer_rules, learn_directory
+from legacy_sql_xml_analyzer.prompting import prepare_prompt_pack_from_analysis
 from legacy_sql_xml_analyzer.validation import validate_profile
 
 
@@ -144,6 +145,14 @@ class AnalyzerIntegrationTests(unittest.TestCase):
 
             diagnostics_dir = output_dir / "analysis" / "markdown" / "diagnostics"
             self.assertTrue(any(path.suffix == ".md" for path in diagnostics_dir.iterdir()))
+
+            failure_clusters_path = output_dir / "analysis" / "failure_clusters.json"
+            prompt_pack_dir = output_dir / "analysis" / "prompt_packs"
+            self.assertTrue(failure_clusters_path.exists())
+            clusters_payload = json.loads(failure_clusters_path.read_text(encoding="utf-8"))
+            cluster_ids = {item["cluster_id"] for item in clusters_payload["clusters"]}
+            self.assertIn("reference_target_missing", cluster_ids)
+            self.assertTrue(any(path.suffix == ".txt" for path in prompt_pack_dir.iterdir()))
 
     def test_cycle_detection_marks_resolution_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -483,6 +492,41 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             executive_payload = json.loads((output_dir / "analysis" / "executive_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(2, executive_payload["trend_summary"]["snapshot_count"])
             self.assertIn("stable", executive_payload["trend_summary"]["status_line"].lower())
+
+    def test_prepare_prompt_pack_from_failure_cluster(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+
+            (input_dir / "broken.xml").write_text(
+                """<sql-mapping>
+  <main-query name="MissingRef">
+    <sql-refer-to name="__MISSING__" main-query="NoSuchMain" />
+    <sql-body><![CDATA[
+      select * from dual __MISSING__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir)
+            result = prepare_prompt_pack_from_analysis(
+                analysis_root=output_dir,
+                cluster_id="reference_target_missing",
+                budget="32k",
+                model="weak-128k",
+            )
+
+            self.assertEqual("reference_target_missing", result["cluster"]["cluster_id"])
+            prompt_dir = output_dir / "analysis" / "prompt_packs"
+            prompt_text = (prompt_dir / "reference_target_missing-32k-weak-128k.txt").read_text(encoding="utf-8")
+            prompt_json = json.loads((prompt_dir / "reference_target_missing-32k-weak-128k.json").read_text(encoding="utf-8"))
+            self.assertIn("Return JSON only with this schema:", prompt_text)
+            self.assertEqual("mapping_inference", prompt_json["task_type"])
 
 
 if __name__ == "__main__":
