@@ -12,6 +12,7 @@ from .models import AnalysisResult, ArtifactDescriptor, DiagnosticModel
 
 SEVERITY_PRIORITY = {"fatal": 4, "error": 3, "warning": 2, "info": 1}
 BUDGET_TO_EXAMPLES = {"8k": 1, "32k": 3, "128k": 5}
+PROMPT_STAGES = ("classify", "propose", "verify")
 
 RULE_DIGEST = [
     "References can be local or external and may point to main-query or sub-query targets.",
@@ -69,29 +70,77 @@ def prepare_prompt_pack(
     prompt_root = analysis_root / "prompt_packs"
     prompt_root.mkdir(parents=True, exist_ok=True)
     cluster_id = cluster["cluster_id"]
+    base_name = f"{cluster_id}-{sanitize_token(budget)}-{sanitize_token(model)}"
     sample_limit = BUDGET_TO_EXAMPLES.get(budget, 3)
     samples = cluster["sample_diagnostics"][:sample_limit]
-    prompt_text = render_prompt_pack_text(cluster=cluster, samples=samples, budget=budget, model=model)
-    prompt_payload = {
+    bundle_payload = {
         "cluster_id": cluster_id,
         "budget": budget,
         "model": model,
         "task_type": cluster["task_type"],
-        "answer_schema": answer_schema_for_cluster(cluster),
+        "stages": {},
         "samples": samples,
-        "prompt_text": prompt_text,
     }
-
-    text_path = prompt_root / f"{cluster_id}-{sanitize_token(budget)}-{sanitize_token(model)}.txt"
-    json_path = prompt_root / f"{cluster_id}-{sanitize_token(budget)}-{sanitize_token(model)}.json"
+    artifacts: list[ArtifactDescriptor] = []
     if write_to_disk:
-        text_path.write_text(prompt_text, encoding="utf-8")
-        json_path.write_text(json.dumps(prompt_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        for stage in PROMPT_STAGES:
+            prompt_text = render_prompt_pack_text(
+                cluster=cluster,
+                samples=samples,
+                budget=budget,
+                model=model,
+                stage=stage,
+            )
+            prompt_payload = {
+                "cluster_id": cluster_id,
+                "budget": budget,
+                "model": model,
+                "stage": stage,
+                "task_type": cluster["task_type"],
+                "answer_schema": answer_schema_for_cluster(cluster, stage=stage),
+                "samples": samples,
+                "prompt_text": prompt_text,
+            }
+            text_path = prompt_root / f"{base_name}-{stage}.txt"
+            json_path = prompt_root / f"{base_name}-{stage}.json"
+            text_path.write_text(prompt_text, encoding="utf-8")
+            json_path.write_text(json.dumps(prompt_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            bundle_payload["stages"][stage] = {
+                "text_path": str(text_path),
+                "json_path": str(json_path),
+            }
+            artifacts.extend(
+                [
+                    artifact_descriptor_for_path(text_path, "text", f"Prompt pack ({stage}): {cluster_id}", "prompting"),
+                    artifact_descriptor_for_path(
+                        json_path,
+                        "json",
+                        f"Prompt pack metadata ({stage}): {cluster_id}",
+                        "prompting",
+                    ),
+                ]
+            )
 
-    return [
-        artifact_descriptor_for_path(text_path, "text", f"Prompt pack: {cluster_id}", "prompting"),
-        artifact_descriptor_for_path(json_path, "json", f"Prompt pack metadata: {cluster_id}", "prompting"),
-    ]
+        # Backward-compatible alias for the original single-stage prompt pack.
+        propose_text_path = prompt_root / f"{base_name}-propose.txt"
+        propose_json_path = prompt_root / f"{base_name}-propose.json"
+        legacy_text_path = prompt_root / f"{base_name}.txt"
+        legacy_json_path = prompt_root / f"{base_name}.json"
+        legacy_text_path.write_text(propose_text_path.read_text(encoding="utf-8"), encoding="utf-8")
+        legacy_json_path.write_text(propose_json_path.read_text(encoding="utf-8"), encoding="utf-8")
+        artifacts.extend(
+            [
+                artifact_descriptor_for_path(legacy_text_path, "text", f"Prompt pack: {cluster_id}", "prompting"),
+                artifact_descriptor_for_path(legacy_json_path, "json", f"Prompt pack metadata: {cluster_id}", "prompting"),
+            ]
+        )
+
+        bundle_path = prompt_root / f"{base_name}-bundle.json"
+        bundle_path.write_text(json.dumps(bundle_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        artifacts.append(
+            artifact_descriptor_for_path(bundle_path, "json", f"Prompt pack bundle: {cluster_id}", "prompting")
+        )
+    return artifacts
 
 
 def load_failure_clusters(analysis_root: Path) -> dict[str, Any]:
@@ -204,8 +253,10 @@ def render_prompt_pack_text(
     samples: list[dict[str, Any]],
     budget: str,
     model: str,
+    stage: str = "propose",
+    prior_response: dict[str, Any] | None = None,
 ) -> str:
-    schema = json.dumps(answer_schema_for_cluster(cluster), indent=2, ensure_ascii=False)
+    schema = json.dumps(answer_schema_for_cluster(cluster, stage=stage), indent=2, ensure_ascii=False)
     sample_blocks = []
     for index, sample in enumerate(samples, start=1):
         sample_blocks.append(
@@ -223,6 +274,7 @@ def render_prompt_pack_text(
         )
 
     lines = [
+        f"Stage: {stage}",
         f"Task type: {cluster['task_type']}",
         f"Target model profile: {model}",
         f"Token budget: {budget}",
@@ -245,6 +297,9 @@ def render_prompt_pack_text(
     for rule in RULE_DIGEST:
         lines.append(f"- {rule}")
 
+    lines.extend(["", "Stage objective:"])
+    lines.extend(stage_objective_lines(stage))
+
     lines.extend(["", "Evidence samples:"])
     if sample_blocks:
         for block in sample_blocks:
@@ -252,6 +307,27 @@ def render_prompt_pack_text(
             lines.append("")
     else:
         lines.append("- No sample diagnostics available.")
+
+    if prior_response is not None:
+        lines.extend(
+            [
+                "",
+                "Prior stage response to reuse:",
+                "```json",
+                json.dumps(prior_response, indent=2, ensure_ascii=False),
+                "```",
+            ]
+        )
+    elif stage == "verify":
+        lines.extend(
+            [
+                "",
+                "Proposal to verify:",
+                "```json",
+                "PASTE_PREVIOUS_PROPOSAL_JSON_HERE",
+                "```",
+            ]
+        )
 
     lines.extend(
         [
@@ -264,8 +340,35 @@ def render_prompt_pack_text(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def answer_schema_for_cluster(cluster: dict[str, Any]) -> dict[str, Any]:
+def answer_schema_for_cluster(cluster: dict[str, Any], stage: str = "propose") -> dict[str, Any]:
+    if stage == "classify":
+        return {
+            "cluster_id": cluster["cluster_id"],
+            "problem_type": cluster["task_type"],
+            "suspected_root_cause": "string",
+            "evidence_summary": ["string"],
+            "missing_evidence": ["string"],
+            "recommended_next_stage": "propose | insufficient_evidence",
+            "confidence": "low | medium | high",
+            "insufficient_evidence": False,
+        }
+    if stage == "verify":
+        return {
+            "cluster_id": cluster["cluster_id"],
+            "problem_type": cluster["task_type"],
+            "verdict": "accept | needs_review | reject",
+            "safe_to_apply": False,
+            "checked_constraints": ["string"],
+            "violations": ["string"],
+            "follow_up_actions": ["string"],
+            "normalized_rule_or_fix": {
+                "rule_type": "string",
+                "scope": "global | source_scoped | local",
+                "payload": {},
+            },
+        }
     return {
+        "cluster_id": cluster["cluster_id"],
         "problem_type": cluster["task_type"],
         "root_cause": "string",
         "proposed_change_type": "profile_rule | xml_fix | sql_fix | insufficient_evidence",
@@ -280,6 +383,26 @@ def answer_schema_for_cluster(cluster: dict[str, Any]) -> dict[str, Any]:
         "risks": ["string"],
         "insufficient_evidence": False,
     }
+
+
+def stage_objective_lines(stage: str) -> list[str]:
+    if stage == "classify":
+        return [
+            "- Identify the most likely failure family behind the repeated diagnostics.",
+            "- Say what evidence is still missing before any rule or XML fix should be proposed.",
+            "- If evidence is enough, hand off to the propose stage.",
+        ]
+    if stage == "verify":
+        return [
+            "- Check whether the proposed fix violates analyzer constraints or existing evidence.",
+            "- Reject changes that guess business SQL semantics or widen the blast radius without proof.",
+            "- Normalize the proposal into the smallest safe rule or fix payload when possible.",
+        ]
+    return [
+        "- Propose the smallest safe change that could reduce this failure cluster.",
+        "- Prefer profile_rule proposals over manual XML/SQL edits when the evidence points to a reusable pattern.",
+        "- Keep the proposal narrowly scoped and easy to verify with another analyzer run.",
+    ]
 
 
 def infer_task_type(code: str) -> str:

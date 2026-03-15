@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .analyzer import analyze_directory
+from .evolution import review_llm_response_from_analysis
 from .learning import freeze_profile, infer_rules, learn_directory
 from .prompting import prepare_prompt_pack_from_analysis
 from .validation import validate_profile
@@ -63,6 +64,18 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_parser.add_argument("--cluster", required=True, help="cluster_id from failure_clusters.json.")
     prompt_parser.add_argument("--budget", default="128k", choices=["8k", "32k", "128k"], help="Target prompt budget.")
     prompt_parser.add_argument("--model", default="weak-128k", help="Descriptive model profile label for the pack.")
+
+    review_parser = subparsers.add_parser(
+        "review-llm-response",
+        help="Review a weak-LLM JSON response and generate follow-up prompts or profile patch candidates.",
+    )
+    review_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory or analysis directory that contains failure_clusters.json.")
+    review_parser.add_argument("--cluster", required=True, help="cluster_id from failure_clusters.json.")
+    review_parser.add_argument("--response", required=True, type=Path, help="Path to the LLM response text or JSON file.")
+    review_parser.add_argument("--stage", default="propose", choices=["classify", "propose", "verify"], help="Prompt stage that produced the response.")
+    review_parser.add_argument("--budget", default="128k", choices=["8k", "32k", "128k"], help="Target prompt budget for generated follow-up prompts.")
+    review_parser.add_argument("--model", default="weak-128k", help="Descriptive model profile label for the follow-up prompt.")
+    review_parser.add_argument("--profile", type=Path, help="Optional profile JSON used to detect redundant or conflicting proposed rules.")
     return parser
 
 
@@ -148,6 +161,24 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Prepared prompt pack for cluster={result['cluster']['cluster_id']}, "
             f"generated {len(result['artifacts'])} artifact(s)."
+        )
+        return 0
+
+    if args.command == "review-llm-response":
+        result = review_llm_response_from_analysis(
+            analysis_root=args.analysis_root.resolve(),
+            cluster_id=args.cluster,
+            response_path=args.response.resolve(),
+            stage=args.stage,
+            budget=args.budget,
+            model=args.model,
+            profile_path=args.profile.resolve() if args.profile else None,
+        )
+        review = result["review"]
+        print(
+            f"Reviewed response for cluster={result['cluster']['cluster_id']} stage={review['stage']} "
+            f"status={review['status']}, issues={len(review['issues'])}, "
+            f"safe_to_apply_candidate={review['safe_to_apply_candidate']}."
         )
         return 0
 

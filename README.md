@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v0.6.0`
+Current local release: `v0.7.0`
 
 ## Usage
 
@@ -58,8 +58,10 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/executive_trend.csv`: spreadsheet-ready run trend export
 - `analysis/failure_clusters.json`: grouped diagnostic families for repeated issues
 - `analysis/failure_clusters.md`: human-readable failure family summary
-- `analysis/prompt_packs/*.txt`: weak-LLM prompt packs for top failure clusters
-- `analysis/prompt_packs/*.json`: prompt metadata and expected answer schema
+- `analysis/prompt_packs/*.txt`: staged weak-LLM prompt packs (`classify`, `propose`, `verify`) plus a backward-compatible propose alias
+- `analysis/prompt_packs/*.json`: prompt metadata, stage schemas, and bundle metadata
+- `analysis/llm_reviews/*.json`: reviewed weak-LLM responses, patch candidates, and follow-up prompt metadata
+- `analysis/llm_reviews/*.md`: human-readable review summaries for weak-LLM responses
 
 Validate whether a frozen profile is actually helping:
 
@@ -83,6 +85,26 @@ Generate or regenerate a prompt pack for a specific failure cluster:
 ```bash
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer prepare-prompt --analysis-root ./analysis-output --cluster reference_target_missing --budget 32k --model weak-128k
 ```
+
+Review a weak-LLM response and convert valid profile-rule proposals into a draft patch candidate:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer review-llm-response --analysis-root ./analysis-output --cluster reference_target_missing --response ./llm-response.json --stage propose --budget 32k --model weak-128k
+```
+
+`prepare-prompt` now emits three prompt stages for each cluster:
+
+- `classify`: tell the weak model to identify the failure family and missing evidence only
+- `propose`: ask for the smallest safe rule or XML/SQL fix
+- `verify`: re-check a proposal against analyzer constraints before you trust it
+
+`review-llm-response` accepts imperfect weak-model output and will:
+
+- strip common markdown code fences around JSON answers
+- validate the reply against the expected stage schema
+- generate a repair prompt when the JSON or fields are invalid
+- generate a follow-up prompt for the next stage when the answer is usable
+- emit a profile patch candidate for safe rule types such as XML alias mappings or token patterns
 
 If you keep reusing the same `--output` directory across runs, the executive dashboard will also show trend direction and recent snapshot comparisons.
 

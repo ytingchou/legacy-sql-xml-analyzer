@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 - 2026-03-15
+
+- Added staged weak-LLM prompt packs so each failure cluster now emits `classify`, `propose`, and `verify` prompts instead of a single monolithic ask.
+- Added `review-llm-response` to validate weak-model JSON answers, repair common formatting failures, and generate follow-up prompts for the next stage.
+- Added safe profile patch candidate generation for supported reusable rule types such as XML alias mappings, token wrappers, target default order, and ignored tags.
+- Added tests covering staged prompt-pack output and LLM response review workflows.
+
 ## 0.6.0 - 2026-03-15
 
 - Added failure clustering so repeated diagnostics are grouped into reusable issue families.

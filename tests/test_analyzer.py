@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from legacy_sql_xml_analyzer.analyzer import analyze_directory
+from legacy_sql_xml_analyzer.evolution import review_llm_response_from_analysis
 from legacy_sql_xml_analyzer.learning import freeze_profile, infer_rules, learn_directory
 from legacy_sql_xml_analyzer.prompting import prepare_prompt_pack_from_analysis
 from legacy_sql_xml_analyzer.validation import validate_profile
@@ -525,8 +526,91 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             prompt_dir = output_dir / "analysis" / "prompt_packs"
             prompt_text = (prompt_dir / "reference_target_missing-32k-weak-128k.txt").read_text(encoding="utf-8")
             prompt_json = json.loads((prompt_dir / "reference_target_missing-32k-weak-128k.json").read_text(encoding="utf-8"))
+            classify_text = (prompt_dir / "reference_target_missing-32k-weak-128k-classify.txt").read_text(encoding="utf-8")
+            verify_text = (prompt_dir / "reference_target_missing-32k-weak-128k-verify.txt").read_text(encoding="utf-8")
+            bundle_json = json.loads((prompt_dir / "reference_target_missing-32k-weak-128k-bundle.json").read_text(encoding="utf-8"))
             self.assertIn("Return JSON only with this schema:", prompt_text)
             self.assertEqual("mapping_inference", prompt_json["task_type"])
+            self.assertEqual("propose", prompt_json["stage"])
+            self.assertIn("Stage: classify", classify_text)
+            self.assertIn("Stage: verify", verify_text)
+            self.assertIn("classify", bundle_json["stages"])
+            self.assertIn("verify", bundle_json["stages"])
+
+    def test_review_llm_response_generates_patch_candidate_and_verify_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            response_path = root / "response.json"
+            input_dir.mkdir()
+
+            (input_dir / "broken.xml").write_text(
+                """<sql-mapping>
+  <main-query name="MissingRef">
+    <ext-sql-refer-to name="__MISSING__" xml="shared" main-query="SharedMain" />
+    <sql-body><![CDATA[
+      select * from dual __MISSING__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir)
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "cluster_id": "reference_target_missing",
+                        "problem_type": "mapping_inference",
+                        "root_cause": "The external xml alias does not match a real file name.",
+                        "proposed_change_type": "profile_rule",
+                        "proposed_rule_or_fix": {
+                            "rule_type": "external_xml_name_mapping",
+                            "scope": "global",
+                            "payload": {
+                                "xml_name": "shared",
+                                "mapped_to": "shared-query.xml",
+                            },
+                        },
+                        "confidence": "high",
+                        "why": ["The alias is stable and points to a single expected target name."],
+                        "verification_steps": ["Run analyze again with the merged profile patch."],
+                        "risks": ["The mapping could be wrong if another module uses a different shared alias."],
+                        "insufficient_evidence": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            result = review_llm_response_from_analysis(
+                analysis_root=output_dir,
+                cluster_id="reference_target_missing",
+                response_path=response_path,
+                stage="propose",
+                budget="32k",
+                model="weak-128k",
+            )
+
+            review = result["review"]
+            self.assertEqual("accepted", review["status"])
+            self.assertTrue(review["safe_to_apply_candidate"])
+            self.assertEqual("external_xml_name_mapping", review["profile_patch_candidate"]["rule_type"])
+            self.assertEqual("next-verify", review["next_prompt_kind"])
+
+            review_dir = output_dir / "analysis" / "llm_reviews"
+            review_payload = json.loads((review_dir / "reference_target_missing-propose-review.json").read_text(encoding="utf-8"))
+            patch_payload = json.loads((review_dir / "reference_target_missing-propose-profile-patch.json").read_text(encoding="utf-8"))
+            verify_prompt = (review_dir / "reference_target_missing-propose-next-verify.txt").read_text(encoding="utf-8")
+            index_payload = json.loads((output_dir / "analysis" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual("accepted", review_payload["status"])
+            self.assertEqual("external_xml_name_mapping", patch_payload["rule_type"])
+            self.assertIn("Prior stage response to reuse:", verify_prompt)
+            self.assertTrue(
+                any(item["path"].endswith("reference_target_missing-propose-review.json") for item in index_payload["artifacts"])
+            )
 
 
 if __name__ == "__main__":
