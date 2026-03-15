@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.0.0`
+Current local release: `v1.1.0`
 
 ## Usage
 
@@ -157,6 +157,42 @@ PYTHONPATH=src python3 -m legacy_sql_xml_analyzer invoke-llm --analysis-root ./a
 - the extracted assistant text
 - token-limit and usage metadata for later debugging
 - optional automatic review output when `--review` is enabled
+
+Compile a phase-specific context pack for weak 128k-token models such as Qwen3:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer compile-context --analysis-root ./analysis-output --cluster reference_target_missing --phase propose --prompt-profile qwen3-128k-autonomous
+```
+
+Run the autonomous multi-phase agent loop until required artifacts are complete or a stop condition is reached:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer run-agent-loop --input ./xml --output ./analysis-output --runner-mode provider --provider-config ./provider.json --prompt-profile qwen3-128k-autonomous
+```
+
+Resume or inspect a previously started loop:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer resume-agent-loop --output ./analysis-output
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer inspect-agent-loop --output ./analysis-output
+```
+
+The autonomous loop adds:
+
+- `analysis/context_packs/*.json|*.md|*.txt`: compact phase-specific context packs tuned for weak 128k-token models
+- `analysis/agent_runs/*.result.json`: normalized provider or bridge task results
+- `analysis/agent_tasks/*.json`: queued Cline-bridge tasks for external subagent execution
+- `analysis/agent_loop/loop_state.json`: resumable loop state, token budget, and progress metadata
+- `analysis/agent_loop/phase_history.json`: per-phase execution history
+- `analysis/agent_loop/completion_report.json`: terminal status with missing required artifacts
+
+The built-in `qwen3-128k-*` prompt profiles are intentionally conservative:
+
+- each phase handles one cluster at a time
+- `classify`, `propose`, and `verify` use separate context packs
+- `verify` is not allowed to invent a new rule
+- `insufficient_evidence` is treated as a valid weak-model answer
+- output headroom is reserved so 128k-token models do not run out of completion budget
 
 Collect accepted reviewed patches into a candidate profile:
 

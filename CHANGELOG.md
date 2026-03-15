@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 - 2026-03-16
+
+- Added autonomous agent loop commands: `run-agent-loop`, `resume-agent-loop`, and `inspect-agent-loop`.
+- Added `compile-context` plus phase-specific context packs for weak 128k-token models such as Qwen3.
+- Added prompt profiles for `qwen3-128k-classify`, `qwen3-128k-propose`, `qwen3-128k-verify`, and `qwen3-128k-autonomous`.
+- Added provider and Cline-bridge runner abstractions plus normalized `analysis/agent_runs/*.result.json` task outputs.
+- Added loop artifacts under `analysis/agent_loop/` including resumable state, phase history, and completion reports.
+- Expanded the executive dashboard and artifact catalog to cover autonomous loop execution and context-pack artifacts.
+- Added tests covering loop state, phase transitions, context compilation, and autonomous loop execution.
+
 ## 1.0.0 - 2026-03-15
 
 - Added `rollback-profile` so promoted profiles can safely revert to their parent or an explicit target profile after regressions.

@@ -159,6 +159,7 @@ def build_executive_summary(
     trend_summary = build_trend_summary(output_dir)
     evolution_summary = evolution_summary or build_evolution_summary(output_dir)
     profile_lifecycle = build_profile_lifecycle_summary(profile_path)
+    agent_loop_summary = build_agent_loop_summary(output_dir)
     snapshot_count = trend_summary["snapshot_count"]
 
     complexity_rows = [
@@ -184,6 +185,7 @@ def build_executive_summary(
         complexity_rows=complexity_rows,
         file_diagnostics=file_diagnostics,
         evolution_summary=evolution_summary,
+        agent_loop_summary=agent_loop_summary,
     )
     next_actions = build_next_actions(
         profile_path=profile_path,
@@ -192,6 +194,7 @@ def build_executive_summary(
         file_diagnostics=file_diagnostics,
         result=result,
         evolution_summary=evolution_summary,
+        agent_loop_summary=agent_loop_summary,
     )
 
     return {
@@ -233,6 +236,7 @@ def build_executive_summary(
             ],
         },
         "evolution_summary": evolution_summary,
+        "agent_loop_summary": agent_loop_summary,
         "profile_lifecycle": profile_lifecycle,
         "next_actions": next_actions,
     }
@@ -307,6 +311,7 @@ def build_management_summary(
     complexity_rows: list[dict[str, Any]],
     file_diagnostics: Counter[str],
     evolution_summary: dict[str, Any],
+    agent_loop_summary: dict[str, Any],
 ) -> list[str]:
     resolved_queries = sum(1 for item in result.resolved_queries if item.status == "resolved")
     total_queries = len(result.resolved_queries)
@@ -337,6 +342,11 @@ def build_management_summary(
             f"{evolution_headline['accepted_reviews']} accepted review(s), and "
             f"{evolution_headline['accepted_patch_count']} accepted patch proposal(s)."
         )
+    if agent_loop_summary.get("available"):
+        summary.append(
+            f"Autonomous agent loop is {agent_loop_summary['status']} at phase "
+            f"{agent_loop_summary['current_phase'] or 'n/a'} after {agent_loop_summary['iteration_count']} iteration(s)."
+        )
     return summary
 
 
@@ -347,6 +357,7 @@ def build_next_actions(
     file_diagnostics: Counter[str],
     result: AnalysisResult,
     evolution_summary: dict[str, Any],
+    agent_loop_summary: dict[str, Any],
 ) -> list[str]:
     actions: list[str] = []
     if result.diagnostics:
@@ -368,6 +379,16 @@ def build_next_actions(
         actions.append("Review weak-LLM repair prompts and retry the clusters that still return invalid or low-confidence JSON.")
     elif evolution_headline.get("accepted_patch_count", 0) > 0:
         actions.append("Simulate and grade the accepted weak-LLM patch candidates before promoting them into a trusted profile.")
+    if agent_loop_summary.get("available") and agent_loop_summary.get("status") != "completed":
+        actions.append(
+            f"Inspect the autonomous agent loop stop reason `{agent_loop_summary.get('stop_reason') or 'n/a'}` "
+            "before re-running or resuming the loop."
+        )
+    if agent_loop_summary.get("missing_artifact_count", 0) > 0:
+        actions.append(
+            f"Close the remaining {agent_loop_summary['missing_artifact_count']} required autonomous-loop artifact(s) "
+            "before treating the run as fully packaged."
+        )
     if profile_path is None:
         actions.append("Run the learn -> infer-rules -> freeze-profile workflow to reduce repetitive resolution failures.")
     else:
@@ -723,6 +744,44 @@ def load_review_payloads(review_root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def build_agent_loop_summary(output_dir: Path) -> dict[str, Any]:
+    loop_root = output_dir / "analysis" / "agent_loop"
+    state_payload = load_json_payload(loop_root / "loop_state.json")
+    completion_payload = load_json_payload(loop_root / "completion_report.json")
+    history_payload = load_json_payload(loop_root / "inspection.json")
+
+    if not state_payload:
+        return {
+            "available": False,
+            "status": None,
+            "current_phase": None,
+            "iteration_count": 0,
+            "stop_reason": None,
+            "missing_artifact_count": 0,
+            "missing_artifacts": [],
+            "latest_events": [],
+        }
+
+    latest_events = history_payload.get("latest_history", [])
+    if not isinstance(latest_events, list):
+        latest_events = []
+
+    missing_artifacts = completion_payload.get("missing_artifacts", [])
+    if not isinstance(missing_artifacts, list):
+        missing_artifacts = []
+
+    return {
+        "available": True,
+        "status": state_payload.get("status"),
+        "current_phase": state_payload.get("current_phase"),
+        "iteration_count": int(state_payload.get("iteration_count", 0) or 0),
+        "stop_reason": completion_payload.get("stop_reason") or state_payload.get("stop_reason"),
+        "missing_artifact_count": len(missing_artifacts),
+        "missing_artifacts": [str(item) for item in missing_artifacts],
+        "latest_events": [item for item in latest_events[-5:] if isinstance(item, dict)],
+    }
+
+
 def build_profile_lifecycle_summary(profile_path: Path | None) -> dict[str, Any]:
     if profile_path is None or not profile_path.exists():
         return {
@@ -802,6 +861,7 @@ def build_profile_lifecycle_summary(profile_path: Path | None) -> dict[str, Any]
 def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
     headline = summary["headline"]
     evolution = summary["evolution_summary"]
+    agent_loop = summary["agent_loop_summary"]
     lifecycle = summary["profile_lifecycle"]
     lines = [
         "# Executive Summary",
@@ -851,6 +911,17 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
     for item in evolution["management_summary"][:3]:
         lines.append(f"- {item}")
 
+    lines.extend(["", "## Agent Loop"])
+    if agent_loop["available"]:
+        lines.append(
+            f"- Status: `{agent_loop['status']}`, current phase: `{agent_loop['current_phase'] or 'n/a'}`, "
+            f"iterations: {agent_loop['iteration_count']}, missing artifacts: {agent_loop['missing_artifact_count']}."
+        )
+        if agent_loop["stop_reason"]:
+            lines.append(f"- Stop reason: `{agent_loop['stop_reason']}`")
+    else:
+        lines.append("- No autonomous agent loop state is available for this run.")
+
     lines.extend(["", "## Profile Lifecycle"])
     if lifecycle["profile_status"]:
         lines.append(
@@ -871,6 +942,7 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
 def render_dashboard_html(summary: dict[str, Any]) -> str:
     headline = summary["headline"]
     evolution = summary["evolution_summary"]
+    agent_loop = summary["agent_loop_summary"]
     lifecycle = summary["profile_lifecycle"]
     management_cards = "".join(f"<li>{escape_html(item)}</li>" for item in summary["management_summary"])
     next_actions = "".join(f"<li>{escape_html(item)}</li>" for item in summary["next_actions"])
@@ -908,6 +980,17 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
         f"<tr><td>{escape_html(item['label'] or item['snapshot_id'])}</td><td>{item['resolved_queries']}</td>"
         f"<td>{item['error_count']}</td><td>{item['warning_count']}</td></tr>"
         for item in trend_history[-8:]
+    )
+    agent_loop_rows = "".join(
+        f"<tr><td>{escape_html(item.get('phase') or 'n/a')}</td><td>{escape_html(item.get('status') or 'n/a')}</td>"
+        f"<td>{escape_html(item.get('cluster_id') or 'n/a')}</td><td>{escape_html(str(item.get('attempt') or 'n/a'))}</td></tr>"
+        for item in agent_loop["latest_events"]
+    )
+    agent_loop_summary = (
+        f"Loop is {agent_loop['status']} at phase {agent_loop['current_phase'] or 'n/a'} after "
+        f"{agent_loop['iteration_count']} iteration(s)."
+        if agent_loop["available"]
+        else "No autonomous agent loop state is available yet."
     )
 
     return f"""<!DOCTYPE html>
@@ -1120,6 +1203,30 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
           </thead>
           <tbody>{lifecycle_rows or '<tr><td colspan=\"4\">No lifecycle history yet</td></tr>'}</tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="panel">
+        <h2>Agent Loop</h2>
+        <p>{escape_html(agent_loop_summary)}</p>
+        <div class="metric-grid">
+          <div class="metric"><strong>{agent_loop['iteration_count']}</strong><span>Iterations</span></div>
+          <div class="metric"><strong>{agent_loop['missing_artifact_count']}</strong><span>Missing Artifacts</span></div>
+          <div class="metric"><strong>{escape_html(agent_loop['current_phase'] or 'n/a')}</strong><span>Current Phase</span></div>
+        </div>
+        <div style="height: 14px"></div>
+        <table>
+          <thead>
+            <tr><th>Phase</th><th>Status</th><th>Cluster</th><th>Attempt</th></tr>
+          </thead>
+          <tbody>{agent_loop_rows or '<tr><td colspan=\"4\">No loop history yet</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Remaining Loop Gaps</h2>
+        <p>{escape_html(agent_loop['stop_reason'] or 'Loop is still active or has no recorded stop reason.')}</p>
+        <ul>{"".join(f"<li>{escape_html(item)}</li>" for item in agent_loop['missing_artifacts'][:8]) or "<li>No missing required artifacts</li>"}</ul>
       </div>
     </section>
 

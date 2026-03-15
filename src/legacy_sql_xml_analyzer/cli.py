@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .agent_loop import inspect_agent_loop, resume_agent_loop, run_agent_loop
 from .analyzer import analyze_directory
+from .context_compiler import compile_context_pack_from_analysis, write_context_pack
 from .evolution import (
     apply_profile_patch_bundle,
     propose_rules_from_analysis,
@@ -13,7 +15,9 @@ from .evolution import (
 from .lifecycle import grade_profile, promote_profile, rollback_profile
 from .llm_provider import invoke_llm_from_analysis
 from .learning import freeze_profile, infer_rules, learn_directory
+from .prompt_profiles import phase_budget_for
 from .prompting import prepare_prompt_pack_from_analysis
+from .schemas import LoopConfig
 from .validation import validate_profile
 from .web import serve_report
 
@@ -159,6 +163,59 @@ def build_parser() -> argparse.ArgumentParser:
     rollback_parser.add_argument("--target-profile", type=Path, help="Optional explicit rollback target profile JSON. Defaults to parent_profile.")
     rollback_parser.add_argument("--reason", help="Optional rollback reason to stamp into lifecycle history.")
     rollback_parser.add_argument("--profile-name", help="Optional profile display name for the rolled-back profile.")
+
+    context_parser = subparsers.add_parser(
+        "compile-context",
+        help="Compile a phase-specific context pack for weak 128k-token models.",
+    )
+    context_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory or analysis directory that contains failure_clusters.json.")
+    context_parser.add_argument("--cluster", required=True, help="cluster_id from failure_clusters.json.")
+    context_parser.add_argument("--phase", required=True, choices=["classify", "propose", "verify"], help="Phase-specific context pack to compile.")
+    context_parser.add_argument("--prompt-profile", default="qwen3-128k-autonomous", help="Prompt profile tuned for the target weak LLM.")
+
+    loop_parser = subparsers.add_parser(
+        "run-agent-loop",
+        help="Run the autonomous multi-phase agent loop until required artifacts are produced or a stop condition is reached.",
+    )
+    loop_parser.add_argument("--input", required=True, type=Path, help="Input directory that contains XML files.")
+    loop_parser.add_argument("--output", required=True, type=Path, help="Output directory for analyzer and loop artifacts.")
+    loop_parser.add_argument("--profile", type=Path, help="Optional frozen or promoted profile JSON.")
+    loop_parser.add_argument("--runner-mode", choices=["provider", "cline_bridge"], default="provider", help="Execution mode for LLM tasks.")
+    loop_parser.add_argument("--prompt-profile", default="qwen3-128k-autonomous", help="Prompt profile tuned for the target weak LLM.")
+    loop_parser.add_argument("--max-iterations", type=int, default=20, help="Maximum loop iterations before stopping.")
+    loop_parser.add_argument("--max-attempts-per-task", type=int, default=3, help="Maximum retries per cluster/phase task.")
+    loop_parser.add_argument("--provider-config", type=Path, help="Optional provider config for provider mode.")
+    loop_parser.add_argument("--provider-base-url", help="Provider base URL or /v1 root for OpenAI-compatible mode.")
+    loop_parser.add_argument("--provider-api-key", help="Provider API key.")
+    loop_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY", help="Environment variable name for the provider API key.")
+    loop_parser.add_argument("--provider-model", help="Provider model name.")
+    loop_parser.add_argument("--provider-name", help="Optional provider label for artifacts.")
+    loop_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override for provider mode.")
+    loop_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
+    loop_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
+    loop_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge after writing each task file.")
+
+    resume_parser = subparsers.add_parser(
+        "resume-agent-loop",
+        help="Resume a previously started autonomous agent loop from loop_state.json.",
+    )
+    resume_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis/agent_loop/loop_state.json.")
+    resume_parser.add_argument("--provider-config", type=Path, help="Optional provider config override for resumed provider-mode runs.")
+    resume_parser.add_argument("--provider-base-url", help="Optional provider base URL override.")
+    resume_parser.add_argument("--provider-api-key", help="Optional provider API key override.")
+    resume_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY", help="Environment variable name for the provider API key.")
+    resume_parser.add_argument("--provider-model", help="Optional provider model override.")
+    resume_parser.add_argument("--provider-name", help="Optional provider label override.")
+    resume_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override.")
+    resume_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
+    resume_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
+    resume_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge after writing each task file.")
+
+    inspect_parser = subparsers.add_parser(
+        "inspect-agent-loop",
+        help="Inspect loop_state and phase history for an autonomous agent loop run.",
+    )
+    inspect_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis/agent_loop/loop_state.json.")
     return parser
 
 
@@ -367,6 +424,89 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             f"Rolled back profile to status={profile.profile_status} with {len(profile.lifecycle_history)} lifecycle event(s)."
+        )
+        return 0
+
+    if args.command == "compile-context":
+        analysis_root = args.analysis_root.resolve()
+        budget = phase_budget_for(args.prompt_profile, args.phase)
+        pack = compile_context_pack_from_analysis(
+            analysis_root=analysis_root,
+            cluster_id=args.cluster,
+            phase=args.phase,
+            prompt_profile=args.prompt_profile,
+        )
+        paths = write_context_pack(analysis_root.parent if analysis_root.name == "analysis" else analysis_root, pack)
+        print(
+            f"Compiled context pack for cluster={args.cluster} phase={args.phase} "
+            f"estimated_tokens={pack.estimated_tokens}/{budget['usable_input_limit']} "
+            f"generated {len(paths)} artifact(s)."
+        )
+        return 0
+
+    if args.command == "run-agent-loop":
+        config = LoopConfig(
+            input_dir=args.input.resolve(),
+            output_dir=args.output.resolve(),
+            profile_path=args.profile.resolve() if args.profile else None,
+            runner_mode=args.runner_mode,
+            prompt_profile=args.prompt_profile,
+            max_iterations=args.max_iterations,
+            max_attempts_per_task=args.max_attempts_per_task,
+            provider_config_path=args.provider_config.resolve() if args.provider_config else None,
+            provider_base_url=args.provider_base_url,
+            provider_api_key=args.provider_api_key,
+            provider_api_key_env=args.provider_api_key_env,
+            provider_model=args.provider_model,
+            provider_name=args.provider_name,
+            token_limit=args.token_limit,
+            temperature=args.temperature,
+            timeout_seconds=args.timeout_seconds,
+            cline_bridge_command=args.cline_bridge_command,
+        )
+        payload = run_agent_loop(config)
+        print(
+            f"Agent loop finished with status={payload['status']} stop_reason={payload['stop_reason'] or 'n/a'} "
+            f"iterations={payload['iterations']} missing_artifacts={len(payload['missing_artifacts'])}."
+        )
+        return 0
+
+    if args.command == "resume-agent-loop":
+        payload = resume_agent_loop(
+            output_dir=args.output.resolve(),
+            config=LoopConfig.from_dict(
+                {
+                    **inspect_agent_loop(args.output.resolve())["state"]["config"],
+                    **{
+                        key: value
+                        for key, value in {
+                            "provider_config_path": str(args.provider_config.resolve()) if args.provider_config else None,
+                            "provider_base_url": args.provider_base_url,
+                            "provider_api_key": args.provider_api_key,
+                            "provider_api_key_env": args.provider_api_key_env,
+                            "provider_model": args.provider_model,
+                            "provider_name": args.provider_name,
+                            "token_limit": args.token_limit,
+                            "temperature": args.temperature,
+                            "timeout_seconds": args.timeout_seconds,
+                            "cline_bridge_command": args.cline_bridge_command,
+                        }.items()
+                        if value is not None
+                    },
+                }
+            ),
+        )
+        print(
+            f"Resumed agent loop with status={payload['status']} stop_reason={payload['stop_reason'] or 'n/a'} "
+            f"iterations={payload['iterations']} missing_artifacts={len(payload['missing_artifacts'])}."
+        )
+        return 0
+
+    if args.command == "inspect-agent-loop":
+        payload = inspect_agent_loop(args.output.resolve())
+        print(
+            f"Loop status={payload['state']['status']} current_phase={payload['state']['current_phase']} "
+            f"history_events={payload['history_count']}."
         )
         return 0
 
