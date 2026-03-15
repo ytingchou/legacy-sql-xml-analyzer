@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.1.0`
+Current local release: `v1.2.0`
 
 ## Usage
 
@@ -193,6 +193,35 @@ The built-in `qwen3-128k-*` prompt profiles are intentionally conservative:
 - `verify` is not allowed to invent a new rule
 - `insufficient_evidence` is treated as a valid weak-model answer
 - output headroom is reserved so 128k-token models do not run out of completion budget
+
+Prepare a Java Spring Boot BFF artifact pack for weak models such as Qwen3, with Oracle 19c SQL logic split into token-safe chunks:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer prepare-java-bff --input ./xml --output ./analysis-output --prompt-profile qwen3-128k-java-bff
+```
+
+Focus the pack on a single entry query when you want the weakest possible prompting context:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer prepare-java-bff --input ./xml --output ./analysis-output --entry-file orders.xml --entry-main-query OrderSearch
+```
+
+`prepare-java-bff` emits:
+
+- `analysis/java_bff/overview.json`: project-level weak-model strategy for Java Spring Boot BFF + Oracle 19c
+- `analysis/java_bff/chunk_manifest.json`: bundle and chunk manifest with token estimates and recommended sequence
+- `analysis/java_bff/implementation_cards/*.json`: per-query implementation cards with SQL logic, binding hints, and manual-review flags
+- `analysis/java_bff/sql_chunks/*.json`: chunked SQL excerpts sized for weak-model repository prompts
+- `analysis/java_bff/bundles/*/bundle.json`: per-entry bundle plans with ordered phase prompts
+- `analysis/java_bff/phase_packs/*/*.json`: phase-specific prompt payloads and answer schemas for `plan`, `repository chunk`, `repository merge`, `bff assembly`, and `verify`
+
+The Java BFF pack is specifically tuned for a weak 128k-token model:
+
+- never feed the full `java_bff` folder to Qwen3 in one shot
+- feed only one bundle at a time
+- feed one `phase-2-repository` chunk prompt at a time
+- use `phase-2-repository-merge` only after all chunk-level outputs are complete
+- if a query is `partial` or `failed`, treat diagnostics as blockers instead of asking the model to guess missing SQL
 
 Collect accepted reviewed patches into a candidate profile:
 

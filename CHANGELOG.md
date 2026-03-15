@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 - 2026-03-16
+
+- Added `prepare-java-bff` to analyze SQL XML and emit weak-model-friendly Java Spring Boot BFF artifacts for Oracle 19c.
+- Added `analysis/java_bff/overview.*`, `chunk_manifest.*`, `implementation_cards/*`, `sql_chunks/*`, `bundles/*`, and `phase_packs/*`.
+- Added `qwen3-128k-java-bff` prompt budgeting so large SQL is split into repository chunk prompts that stay below weak-model limits.
+- Added phased Java BFF prompt packs for `plan`, `repository chunk`, `repository merge`, `bff assembly`, and `verify`.
+- Expanded the artifact catalog with Java BFF contracts for chunked implementation logic generation.
+- Added tests covering Java BFF bundle generation and SQL chunk splitting for large queries.
+
 ## 1.1.0 - 2026-03-16
 
 - Added autonomous agent loop commands: `run-agent-loop`, `resume-agent-loop`, and `inspect-agent-loop`.

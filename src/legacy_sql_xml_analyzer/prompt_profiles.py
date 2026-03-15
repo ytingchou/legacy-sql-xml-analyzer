@@ -45,6 +45,26 @@ PROFILES: dict[str, dict[str, Any]] = {
             "package": 12000,
         },
     },
+    "qwen3-128k-java-bff": {
+        "model_limit": 128000,
+        "reserved_output": 12000,
+        "reserved_system": 4000,
+        "reserved_repair": 8000,
+        "stage_examples": {
+            "phase-1-plan": 8,
+            "phase-2-repository-chunk": 1,
+            "phase-2-repository-merge": 1,
+            "phase-3-bff-assembly": 8,
+            "phase-4-verify": 8,
+        },
+        "phase_limits": {
+            "phase-1-plan": 18000,
+            "phase-2-repository-chunk": 22000,
+            "phase-2-repository-merge": 12000,
+            "phase-3-bff-assembly": 18000,
+            "phase-4-verify": 14000,
+        },
+    },
 }
 
 

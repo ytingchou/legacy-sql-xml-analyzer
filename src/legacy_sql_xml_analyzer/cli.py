@@ -12,6 +12,7 @@ from .evolution import (
     review_llm_response_from_analysis,
     simulate_candidate_profile,
 )
+from .java_bff import prepare_java_bff_from_input
 from .lifecycle import grade_profile, promote_profile, rollback_profile
 from .llm_provider import invoke_llm_from_analysis
 from .learning import freeze_profile, infer_rules, learn_directory
@@ -216,6 +217,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect loop_state and phase history for an autonomous agent loop run.",
     )
     inspect_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis/agent_loop/loop_state.json.")
+
+    java_bff_parser = subparsers.add_parser(
+        "prepare-java-bff",
+        help="Analyze SQL XML and emit chunked Java Spring Boot BFF artifacts for weak 128k-token models.",
+    )
+    java_bff_parser.add_argument("--input", required=True, type=Path, help="Input directory that contains XML files.")
+    java_bff_parser.add_argument("--output", required=True, type=Path, help="Output directory for analysis and Java BFF artifacts.")
+    java_bff_parser.add_argument("--profile", type=Path, help="Optional frozen or promoted profile JSON.")
+    java_bff_parser.add_argument("--entry-file", help="Optional XML filename to focus the Java BFF pack.")
+    java_bff_parser.add_argument("--entry-main-query", help="Optional main-query name to focus the Java BFF pack.")
+    java_bff_parser.add_argument("--prompt-profile", default="qwen3-128k-java-bff", help="Prompt profile tuned for the target weak LLM.")
+    java_bff_parser.add_argument("--max-sql-chunk-tokens", type=int, help="Optional SQL chunk token cap for phase-2 repository prompts.")
     return parser
 
 
@@ -507,6 +520,23 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Loop status={payload['state']['status']} current_phase={payload['state']['current_phase']} "
             f"history_events={payload['history_count']}."
+        )
+        return 0
+
+    if args.command == "prepare-java-bff":
+        payload = prepare_java_bff_from_input(
+            input_dir=args.input.resolve(),
+            output_dir=args.output.resolve(),
+            profile_path=args.profile.resolve() if args.profile else None,
+            entry_file=args.entry_file,
+            entry_main_query=args.entry_main_query,
+            prompt_profile=args.prompt_profile,
+            max_sql_chunk_tokens=args.max_sql_chunk_tokens,
+        )
+        print(
+            f"Prepared Java BFF artifacts with bundles={payload['summary']['bundle_count']} "
+            f"chunks={payload['summary']['chunk_count']} prompts={payload['summary']['prompt_count']} "
+            f"chunk_token_limit={payload['summary']['chunk_token_limit']}."
         )
         return 0
 
