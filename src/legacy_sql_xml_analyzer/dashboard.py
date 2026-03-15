@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .learning import load_profile
 from .models import AnalysisResult, ArtifactDescriptor, ResolvedQueryModel
 
 
@@ -25,7 +26,13 @@ def write_executive_report(
 ) -> list[ArtifactDescriptor]:
     analysis_root = output_dir / "analysis"
     analysis_root.mkdir(parents=True, exist_ok=True)
-    summary = build_executive_summary(output_dir=output_dir, result=result, profile_path=profile_path)
+    evolution_summary = build_evolution_summary(output_dir)
+    summary = build_executive_summary(
+        output_dir=output_dir,
+        result=result,
+        profile_path=profile_path,
+        evolution_summary=evolution_summary,
+    )
 
     json_path = analysis_root / "executive_summary.json"
     md_path = analysis_root / "executive_summary.md"
@@ -34,6 +41,8 @@ def write_executive_report(
     value_csv_path = analysis_root / "executive_value.csv"
     diagnostics_csv_path = analysis_root / "executive_diagnostics.csv"
     trend_csv_path = analysis_root / "executive_trend.csv"
+    llm_effectiveness_csv_path = analysis_root / "llm_effectiveness.csv"
+    profile_lifecycle_csv_path = analysis_root / "profile_lifecycle.csv"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_executive_summary_markdown(summary), encoding="utf-8")
     html_path.write_text(render_dashboard_html(summary), encoding="utf-8")
@@ -86,6 +95,41 @@ def write_executive_report(
         summary["trend_summary"]["history"],
         ["snapshot_id", "generated_at", "label", "resolved_queries", "partial_queries", "failed_queries", "error_count", "warning_count"],
     )
+    write_csv(
+        llm_effectiveness_csv_path,
+        evolution_summary["provider_scoreboard"],
+        [
+            "provider_name",
+            "provider_model",
+            "stage",
+            "run_count",
+            "reviewed_runs",
+            "accepted_reviews",
+            "needs_revision_reviews",
+            "rejected_reviews",
+            "accepted_review_rate",
+            "avg_prompt_tokens",
+            "avg_completion_tokens",
+            "avg_requested_tokens",
+            "avg_total_tokens",
+        ],
+    )
+    write_csv(
+        profile_lifecycle_csv_path,
+        summary["profile_lifecycle"]["history_rows"],
+        [
+            "generated_at",
+            "event_type",
+            "from_status",
+            "to_status",
+            "source_profile_path",
+            "target_profile_path",
+            "assessment_classification",
+            "promotion_readiness",
+            "reason",
+        ],
+    )
+    evolution_artifacts = write_evolution_report(output_dir, evolution_summary=evolution_summary)
 
     return [
         artifact_descriptor_for_path(json_path, "json", "Executive summary", "executive"),
@@ -95,13 +139,16 @@ def write_executive_report(
         artifact_descriptor_for_path(value_csv_path, "csv", "Executive value export", "executive"),
         artifact_descriptor_for_path(diagnostics_csv_path, "csv", "Executive diagnostics export", "executive"),
         artifact_descriptor_for_path(trend_csv_path, "csv", "Executive trend export", "executive"),
-    ]
+        artifact_descriptor_for_path(llm_effectiveness_csv_path, "csv", "LLM effectiveness export", "executive"),
+        artifact_descriptor_for_path(profile_lifecycle_csv_path, "csv", "Profile lifecycle export", "executive"),
+    ] + evolution_artifacts
 
 
 def build_executive_summary(
     output_dir: Path,
     result: AnalysisResult,
     profile_path: Path | None,
+    evolution_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     inbound_references = Counter(
         dependency
@@ -110,6 +157,8 @@ def build_executive_summary(
     )
     file_diagnostics = Counter(str(diagnostic.source_path) for diagnostic in result.diagnostics)
     trend_summary = build_trend_summary(output_dir)
+    evolution_summary = evolution_summary or build_evolution_summary(output_dir)
+    profile_lifecycle = build_profile_lifecycle_summary(profile_path)
     snapshot_count = trend_summary["snapshot_count"]
 
     complexity_rows = [
@@ -134,6 +183,7 @@ def build_executive_summary(
         high_risk_queries=high_risk_queries,
         complexity_rows=complexity_rows,
         file_diagnostics=file_diagnostics,
+        evolution_summary=evolution_summary,
     )
     next_actions = build_next_actions(
         profile_path=profile_path,
@@ -141,6 +191,7 @@ def build_executive_summary(
         high_risk_queries=high_risk_queries,
         file_diagnostics=file_diagnostics,
         result=result,
+        evolution_summary=evolution_summary,
     )
 
     return {
@@ -181,6 +232,8 @@ def build_executive_summary(
                 for code, count in top_diagnostics
             ],
         },
+        "evolution_summary": evolution_summary,
+        "profile_lifecycle": profile_lifecycle,
         "next_actions": next_actions,
     }
 
@@ -253,6 +306,7 @@ def build_management_summary(
     high_risk_queries: list[dict[str, Any]],
     complexity_rows: list[dict[str, Any]],
     file_diagnostics: Counter[str],
+    evolution_summary: dict[str, Any],
 ) -> list[str]:
     resolved_queries = sum(1 for item in result.resolved_queries if item.status == "resolved")
     total_queries = len(result.resolved_queries)
@@ -276,6 +330,13 @@ def build_management_summary(
         summary.append(f"The file with the highest diagnostic concentration is {Path(file_path).name} ({count} findings).")
     if snapshot_count:
         summary.append(f"This output directory now contains {snapshot_count} historical run snapshot(s).")
+    evolution_headline = evolution_summary.get("headline", {})
+    if evolution_headline.get("llm_run_count"):
+        summary.append(
+            f"Weak-LLM evolution has {evolution_headline['llm_run_count']} saved run(s), "
+            f"{evolution_headline['accepted_reviews']} accepted review(s), and "
+            f"{evolution_headline['accepted_patch_count']} accepted patch proposal(s)."
+        )
     return summary
 
 
@@ -285,6 +346,7 @@ def build_next_actions(
     high_risk_queries: list[dict[str, Any]],
     file_diagnostics: Counter[str],
     result: AnalysisResult,
+    evolution_summary: dict[str, Any],
 ) -> list[str]:
     actions: list[str] = []
     if result.diagnostics:
@@ -301,6 +363,11 @@ def build_next_actions(
         actions.append(
             f"Prioritize cleanup in {Path(file_diagnostics.most_common(1)[0][0]).name}, which currently has the densest findings."
         )
+    evolution_headline = evolution_summary.get("headline", {})
+    if evolution_headline.get("needs_revision_reviews", 0) > 0:
+        actions.append("Review weak-LLM repair prompts and retry the clusters that still return invalid or low-confidence JSON.")
+    elif evolution_headline.get("accepted_patch_count", 0) > 0:
+        actions.append("Simulate and grade the accepted weak-LLM patch candidates before promoting them into a trusted profile.")
     if profile_path is None:
         actions.append("Run the learn -> infer-rules -> freeze-profile workflow to reduce repetitive resolution failures.")
     else:
@@ -308,8 +375,434 @@ def build_next_actions(
     return actions[:5]
 
 
+def write_evolution_report(
+    output_dir: Path,
+    evolution_summary: dict[str, Any] | None = None,
+) -> list[ArtifactDescriptor]:
+    analysis_root = output_dir / "analysis"
+    analysis_root.mkdir(parents=True, exist_ok=True)
+    summary = evolution_summary or build_evolution_summary(output_dir)
+    json_path = analysis_root / "evolution_summary.json"
+    md_path = analysis_root / "evolution_summary.md"
+    scoreboard_json_path = analysis_root / "prompt_scoreboard.json"
+    scoreboard_csv_path = analysis_root / "prompt_scoreboard.csv"
+    html_path = analysis_root / "evolution_console.html"
+    json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    md_path.write_text(render_evolution_summary_markdown(summary), encoding="utf-8")
+    scoreboard_json_path.write_text(
+        json.dumps(summary["provider_scoreboard"], indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    write_csv(
+        scoreboard_csv_path,
+        summary["provider_scoreboard"],
+        [
+            "provider_name",
+            "provider_model",
+            "stage",
+            "run_count",
+            "reviewed_runs",
+            "accepted_reviews",
+            "needs_revision_reviews",
+            "rejected_reviews",
+            "accepted_review_rate",
+            "avg_prompt_tokens",
+            "avg_requested_tokens",
+            "avg_completion_tokens",
+            "avg_total_tokens",
+        ],
+    )
+    html_path.write_text(render_evolution_console_html(summary), encoding="utf-8")
+    return [
+        artifact_descriptor_for_path(json_path, "json", "Evolution summary", "prompting"),
+        artifact_descriptor_for_path(md_path, "markdown", "Evolution summary (Markdown)", "prompting"),
+        artifact_descriptor_for_path(scoreboard_json_path, "json", "Prompt scoreboard", "prompting"),
+        artifact_descriptor_for_path(scoreboard_csv_path, "csv", "Prompt scoreboard export", "prompting"),
+        artifact_descriptor_for_path(html_path, "html", "Evolution console", "prompting"),
+    ]
+
+
+def build_evolution_summary(output_dir: Path) -> dict[str, Any]:
+    analysis_root = output_dir / "analysis"
+    failure_clusters = load_json_list(analysis_root / "failure_clusters.json", "clusters")
+    llm_run_summaries = load_run_summaries(analysis_root / "llm_runs")
+    review_payloads = load_review_payloads(analysis_root / "llm_reviews")
+    proposal_payload = load_json_payload(analysis_root / "proposals" / "rule_proposals.json")
+    candidate_profile_payload = load_json_payload(analysis_root / "proposals" / "candidate_profile.json")
+
+    headline = {
+        "failure_cluster_count": len(failure_clusters),
+        "llm_run_count": len(llm_run_summaries),
+        "reviewed_count": len(review_payloads),
+        "accepted_reviews": sum(1 for item in review_payloads if item.get("status") == "accepted"),
+        "needs_revision_reviews": sum(1 for item in review_payloads if item.get("status") == "needs_revision"),
+        "insufficient_evidence_reviews": sum(1 for item in review_payloads if item.get("status") == "insufficient_evidence"),
+        "safe_patch_candidates": sum(1 for item in review_payloads if item.get("safe_to_apply_candidate")),
+        "accepted_patch_count": int(proposal_payload.get("summary", {}).get("accepted_patch_count", 0)),
+        "candidate_rule_count": int(proposal_payload.get("summary", {}).get("candidate_rule_count", 0)),
+    }
+    provider_rows = build_provider_scoreboard(llm_run_summaries)
+    cluster_rows = build_cluster_scoreboard(failure_clusters, llm_run_summaries, review_payloads)
+    top_repairs = sorted(
+        [item for item in cluster_rows if item["needs_revision_reviews"] > 0],
+        key=lambda item: (-int(item["needs_revision_reviews"]), item["cluster_id"]),
+    )[:8]
+    management_summary = [
+        f"{headline['llm_run_count']} weak-LLM run(s) and {headline['reviewed_count']} review(s) have been captured.",
+        f"{headline['accepted_reviews']} review(s) were accepted, and {headline['needs_revision_reviews']} still need repair prompts.",
+        f"{headline['accepted_patch_count']} accepted patch candidate(s) are currently available for simulation.",
+    ]
+    if provider_rows:
+        best_provider = provider_rows[0]
+        management_summary.append(
+            f"Most productive provider/stage so far: {best_provider['provider_name']} / {best_provider['provider_model']} / "
+            f"{best_provider['stage']} with accepted rate {best_provider['accepted_review_rate']}%."
+        )
+
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "headline": headline,
+        "management_summary": management_summary,
+        "provider_scoreboard": provider_rows,
+        "cluster_scoreboard": cluster_rows[:10],
+        "repair_hotspots": top_repairs,
+        "proposal_summary": {
+            "accepted_patch_count": headline["accepted_patch_count"],
+            "candidate_rule_count": headline["candidate_rule_count"],
+            "skipped_review_count": int(proposal_payload.get("summary", {}).get("skipped_review_count", 0)),
+            "base_rule_count": int(proposal_payload.get("summary", {}).get("base_rule_count", 0)),
+            "candidate_profile_status": candidate_profile_payload.get("profile_status"),
+            "candidate_profile_version": candidate_profile_payload.get("profile_version"),
+        },
+    }
+
+
+def build_provider_scoreboard(llm_run_summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in llm_run_summaries:
+        key = (
+            str(item.get("provider_name") or item.get("provider_model") or "unknown"),
+            str(item.get("provider_model") or "unknown"),
+            str(item.get("stage") or "unknown"),
+        )
+        bucket = buckets.setdefault(
+            key,
+            {
+                "provider_name": key[0],
+                "provider_model": key[1],
+                "stage": key[2],
+                "run_count": 0,
+                "reviewed_runs": 0,
+                "accepted_reviews": 0,
+                "needs_revision_reviews": 0,
+                "rejected_reviews": 0,
+                "prompt_tokens_total": 0,
+                "requested_tokens_total": 0,
+                "completion_tokens_total": 0,
+                "total_tokens_total": 0,
+            },
+        )
+        bucket["run_count"] += 1
+        bucket["prompt_tokens_total"] += int(item.get("prompt_estimated_tokens", 0))
+        bucket["requested_tokens_total"] += int(item.get("token_limit", 0) or 0)
+        usage = item.get("response_usage", {})
+        if isinstance(usage, dict):
+            bucket["completion_tokens_total"] += int(usage.get("completion_tokens", 0) or 0)
+            bucket["total_tokens_total"] += int(usage.get("total_tokens", 0) or 0)
+        review_status = str(item.get("review_status") or "").strip()
+        if review_status:
+            bucket["reviewed_runs"] += 1
+            if review_status == "accepted":
+                bucket["accepted_reviews"] += 1
+            elif review_status == "needs_revision":
+                bucket["needs_revision_reviews"] += 1
+            else:
+                bucket["rejected_reviews"] += 1
+
+    rows = []
+    for bucket in buckets.values():
+        run_count = max(bucket["run_count"], 1)
+        reviewed_runs = max(bucket["reviewed_runs"], 1) if bucket["reviewed_runs"] else 0
+        accepted_rate = round((bucket["accepted_reviews"] / reviewed_runs) * 100, 1) if reviewed_runs else 0.0
+        rows.append(
+            {
+                "provider_name": bucket["provider_name"],
+                "provider_model": bucket["provider_model"],
+                "stage": bucket["stage"],
+                "run_count": bucket["run_count"],
+                "reviewed_runs": bucket["reviewed_runs"],
+                "reviewed_run_count": bucket["reviewed_runs"],
+                "accepted_reviews": bucket["accepted_reviews"],
+                "needs_revision_reviews": bucket["needs_revision_reviews"],
+                "rejected_reviews": bucket["rejected_reviews"],
+                "accepted_review_rate": accepted_rate,
+                "acceptance_rate": accepted_rate,
+                "avg_prompt_tokens": round(bucket["prompt_tokens_total"] / run_count, 1),
+                "avg_requested_tokens": round(bucket["requested_tokens_total"] / run_count, 1),
+                "avg_completion_tokens": round(bucket["completion_tokens_total"] / run_count, 1),
+                "avg_total_tokens": round(bucket["total_tokens_total"] / run_count, 1),
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            -float(item["accepted_review_rate"]),
+            -int(item["accepted_reviews"]),
+            -int(item["run_count"]),
+            item["provider_name"],
+            item["stage"],
+        )
+    )
+    return rows
+
+
+def build_profile_lifecycle_summary(profile_path: Path | None) -> dict[str, Any]:
+    if profile_path is None or not profile_path.exists():
+        return {
+            "profile_name": None,
+            "profile_status": None,
+            "profile_version": None,
+            "validation_count": 0,
+            "lifecycle_event_count": 0,
+            "history_rows": [],
+        }
+    profile = load_profile(profile_path)
+    if profile is None:
+        return {
+            "profile_name": None,
+            "profile_status": None,
+            "profile_version": None,
+            "validation_count": 0,
+            "lifecycle_event_count": 0,
+            "history_rows": [],
+        }
+    return {
+        "profile_name": profile.profile_name,
+        "profile_status": profile.profile_status,
+        "profile_version": profile.profile_version,
+        "validation_count": len(profile.validation_history),
+        "lifecycle_event_count": len(profile.lifecycle_history),
+        "history_rows": [
+            {
+                "generated_at": item.get("generated_at"),
+                "event_type": item.get("event_type"),
+                "from_status": item.get("from_status"),
+                "to_status": item.get("to_status"),
+                "source_profile_path": item.get("source_profile_path"),
+                "target_profile_path": item.get("target_profile_path"),
+                "assessment_classification": item.get("assessment_classification"),
+                "promotion_readiness": item.get("promotion_readiness"),
+                "reason": item.get("reason"),
+            }
+            for item in profile.lifecycle_history
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def build_cluster_scoreboard(
+    failure_clusters: list[dict[str, Any]],
+    llm_run_summaries: list[dict[str, Any]],
+    review_payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for cluster in failure_clusters:
+        cluster_id = str(cluster.get("cluster_id") or "unknown")
+        buckets[cluster_id] = {
+            "cluster_id": cluster_id,
+            "task_type": str(cluster.get("task_type") or "unknown"),
+            "occurrence_count": int(cluster.get("occurrence_count", 0) or 0),
+            "files_affected": int(cluster.get("files_affected", 0) or 0),
+            "llm_runs": 0,
+            "accepted_reviews": 0,
+            "needs_revision_reviews": 0,
+            "rejected_reviews": 0,
+            "insufficient_evidence_reviews": 0,
+            "safe_patch_candidates": 0,
+        }
+    for item in llm_run_summaries:
+        cluster_id = str(item.get("cluster_id") or "unknown")
+        bucket = buckets.setdefault(
+            cluster_id,
+            {
+                "cluster_id": cluster_id,
+                "task_type": "unknown",
+                "occurrence_count": 0,
+                "files_affected": 0,
+                "llm_runs": 0,
+                "accepted_reviews": 0,
+                "needs_revision_reviews": 0,
+                "rejected_reviews": 0,
+                "insufficient_evidence_reviews": 0,
+                "safe_patch_candidates": 0,
+            },
+        )
+        bucket["llm_runs"] += 1
+    for item in review_payloads:
+        cluster_id = str(item.get("cluster_id") or "unknown")
+        bucket = buckets.setdefault(
+            cluster_id,
+            {
+                "cluster_id": cluster_id,
+                "task_type": "unknown",
+                "occurrence_count": 0,
+                "files_affected": 0,
+                "llm_runs": 0,
+                "accepted_reviews": 0,
+                "needs_revision_reviews": 0,
+                "rejected_reviews": 0,
+                "insufficient_evidence_reviews": 0,
+                "safe_patch_candidates": 0,
+            },
+        )
+        status = str(item.get("status") or "").strip()
+        if status == "accepted":
+            bucket["accepted_reviews"] += 1
+        elif status == "needs_revision":
+            bucket["needs_revision_reviews"] += 1
+        elif status == "insufficient_evidence":
+            bucket["insufficient_evidence_reviews"] += 1
+        elif status:
+            bucket["rejected_reviews"] += 1
+        if item.get("safe_to_apply_candidate"):
+            bucket["safe_patch_candidates"] += 1
+    rows = list(buckets.values())
+    for item in rows:
+        reviewed_count = item["accepted_reviews"] + item["needs_revision_reviews"] + item["rejected_reviews"]
+        item["acceptance_rate"] = round((item["accepted_reviews"] / reviewed_count) * 100, 1) if reviewed_count else 0.0
+    rows.sort(
+        key=lambda item: (
+            -int(item["safe_patch_candidates"]),
+            -int(item["accepted_reviews"]),
+            -int(item["llm_runs"]),
+            -int(item["occurrence_count"]),
+            item["cluster_id"],
+        )
+    )
+    return rows
+
+
+def load_json_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_json_list(path: Path, key: str) -> list[dict[str, Any]]:
+    payload = load_json_payload(path)
+    items = payload.get(key, [])
+    return [item for item in items if isinstance(item, dict)]
+
+
+def load_run_summaries(run_root: Path) -> list[dict[str, Any]]:
+    if not run_root.exists():
+        return []
+    index_payload = load_json_payload(run_root / "index.json")
+    indexed_runs = index_payload.get("runs", [])
+    if isinstance(indexed_runs, list) and indexed_runs:
+        return [item for item in indexed_runs if isinstance(item, dict)]
+    rows: list[dict[str, Any]] = []
+    for summary_path in sorted(run_root.glob("*/run_summary.json")):
+        payload = load_json_payload(summary_path)
+        if payload:
+            rows.append(payload)
+    return rows
+
+
+def load_review_payloads(review_root: Path) -> list[dict[str, Any]]:
+    if not review_root.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for review_path in sorted(review_root.glob("*-review.json")):
+        payload = load_json_payload(review_path)
+        if payload:
+            rows.append(payload)
+    return rows
+
+
+def build_profile_lifecycle_summary(profile_path: Path | None) -> dict[str, Any]:
+    if profile_path is None or not profile_path.exists():
+        return {
+            "profile_name": None,
+            "profile_status": None,
+            "profile_version": None,
+            "validation_count": 0,
+            "lifecycle_event_count": 0,
+            "assessment_counts": {},
+            "latest_validation": None,
+            "latest_event": None,
+            "history_rows": [],
+        }
+
+    profile = load_profile(profile_path)
+    if profile is None:
+        return {
+            "profile_name": profile_path.stem,
+            "profile_status": None,
+            "profile_version": None,
+            "validation_count": 0,
+            "lifecycle_event_count": 0,
+            "assessment_counts": {},
+            "latest_validation": None,
+            "latest_event": None,
+            "history_rows": [],
+        }
+
+    assessment_counts = Counter(
+        str(item.get("assessment_classification", "")).strip().lower()
+        for item in profile.validation_history
+        if isinstance(item, dict)
+    )
+    history_rows = [
+        {
+            "generated_at": event.get("generated_at"),
+            "event_type": event.get("event_type"),
+            "from_status": event.get("from_status"),
+            "to_status": event.get("to_status"),
+            "source_profile_path": event.get("source_profile_path"),
+            "target_profile_path": event.get("target_profile_path"),
+            "assessment_classification": event.get("assessment_classification"),
+            "promotion_readiness": event.get("promotion_readiness"),
+            "reason": event.get("reason"),
+        }
+        for event in profile.lifecycle_history
+        if isinstance(event, dict)
+    ]
+    if not history_rows:
+        history_rows = [
+            {
+                "generated_at": profile.generated_at,
+                "event_type": "current",
+                "from_status": None,
+                "to_status": profile.profile_status,
+                "source_profile_path": profile.parent_profile,
+                "target_profile_path": str(profile_path.resolve()),
+                "assessment_classification": None,
+                "promotion_readiness": None,
+                "reason": None,
+            }
+        ]
+
+    return {
+        "profile_name": profile.profile_name or profile_path.stem,
+        "profile_status": profile.profile_status,
+        "profile_version": profile.profile_version,
+        "validation_count": len(profile.validation_history),
+        "lifecycle_event_count": len(profile.lifecycle_history),
+        "assessment_counts": dict(sorted((key, value) for key, value in assessment_counts.items() if key)),
+        "latest_validation": profile.validation_history[-1] if profile.validation_history else None,
+        "latest_event": profile.lifecycle_history[-1] if profile.lifecycle_history else None,
+        "history_rows": history_rows,
+    }
+
+
 def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
     headline = summary["headline"]
+    evolution = summary["evolution_summary"]
+    lifecycle = summary["profile_lifecycle"]
     lines = [
         "# Executive Summary",
         "",
@@ -350,6 +843,25 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
     if trend["status_line"]:
         lines.append(f"- {trend['status_line']}")
 
+    lines.extend(["", "## Evolution"])
+    lines.append(
+        f"- LLM runs: {evolution['headline']['llm_run_count']}, reviews: {evolution['headline']['reviewed_count']}, "
+        f"accepted patches: {evolution['headline']['accepted_patch_count']}"
+    )
+    for item in evolution["management_summary"][:3]:
+        lines.append(f"- {item}")
+
+    lines.extend(["", "## Profile Lifecycle"])
+    if lifecycle["profile_status"]:
+        lines.append(
+            f"- Profile `{lifecycle['profile_name']}` is currently `{lifecycle['profile_status']}` at version {lifecycle['profile_version']}."
+        )
+        lines.append(
+            f"- Validation records: {lifecycle['validation_count']}, lifecycle events: {lifecycle['lifecycle_event_count']}."
+        )
+    else:
+        lines.append("- No active profile metadata was supplied for this run.")
+
     lines.extend(["", "## Next Actions"])
     for item in summary["next_actions"]:
         lines.append(f"- {item}")
@@ -358,6 +870,8 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
 
 def render_dashboard_html(summary: dict[str, Any]) -> str:
     headline = summary["headline"]
+    evolution = summary["evolution_summary"]
+    lifecycle = summary["profile_lifecycle"]
     management_cards = "".join(f"<li>{escape_html(item)}</li>" for item in summary["management_summary"])
     next_actions = "".join(f"<li>{escape_html(item)}</li>" for item in summary["next_actions"])
     complex_rows = "".join(render_query_row(item) for item in summary["complexity_summary"]["top_complex_queries"][:10])
@@ -375,6 +889,21 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
     resolved_sparkline = render_sparkline_svg([item["resolved_queries"] for item in trend_history], "#174b63")
     error_sparkline = render_sparkline_svg([item["error_count"] for item in trend_history], "#8f1d22")
     warning_sparkline = render_sparkline_svg([item["warning_count"] for item in trend_history], "#b45f29")
+    evolution_rows = "".join(
+        f"<tr><td>{escape_html(item['provider_name'])}</td><td>{escape_html(item['provider_model'])}</td><td>{escape_html(item['stage'])}</td>"
+        f"<td>{item['run_count']}</td><td>{item['accepted_review_rate']}%</td></tr>"
+        for item in evolution["provider_scoreboard"][:8]
+    )
+    lifecycle_rows = "".join(
+        f"<tr><td>{escape_html(item.get('event_type') or 'current')}</td><td>{escape_html(item.get('from_status') or 'n/a')}</td>"
+        f"<td>{escape_html(item.get('to_status') or 'n/a')}</td><td>{escape_html(item.get('assessment_classification') or item.get('reason') or 'n/a')}</td></tr>"
+        for item in lifecycle["history_rows"][-6:]
+    )
+    lifecycle_summary = (
+        f"{lifecycle['profile_name']} is {lifecycle['profile_status']} at version {lifecycle['profile_version']}."
+        if lifecycle["profile_status"]
+        else "No active profile metadata for this run."
+    )
     trend_rows = "".join(
         f"<tr><td>{escape_html(item['label'] or item['snapshot_id'])}</td><td>{item['resolved_queries']}</td>"
         f"<td>{item['error_count']}</td><td>{item['warning_count']}</td></tr>"
@@ -561,6 +1090,39 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
       </div>
     </section>
 
+    <section class="three-col">
+      <div class="panel">
+        <h2>LLM Evolution</h2>
+        <p>{escape_html(evolution['management_summary'][0] if evolution['management_summary'] else 'No LLM evolution data yet.')}</p>
+        <div class="metric-grid">
+          <div class="metric"><strong>{evolution['headline']['llm_run_count']}</strong><span>LLM Runs</span></div>
+          <div class="metric"><strong>{evolution['headline']['reviewed_count']}</strong><span>Reviews</span></div>
+          <div class="metric"><strong>{evolution['headline']['accepted_reviews']}</strong><span>Accepted</span></div>
+          <div class="metric"><strong>{evolution['headline']['accepted_patch_count']}</strong><span>Patches</span></div>
+        </div>
+        <div class="footer"><a href="evolution_console.html">Open evolution console</a></div>
+      </div>
+      <div class="panel">
+        <h2>Provider Scoreboard</h2>
+        <table>
+          <thead>
+            <tr><th>Provider</th><th>Model</th><th>Stage</th><th>Runs</th><th>Accepted</th></tr>
+          </thead>
+          <tbody>{evolution_rows or '<tr><td colspan=\"5\">No LLM runs yet</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Profile Lifecycle</h2>
+        <p>{escape_html(lifecycle_summary)}</p>
+        <table>
+          <thead>
+            <tr><th>Event</th><th>From</th><th>To</th><th>Detail</th></tr>
+          </thead>
+          <tbody>{lifecycle_rows or '<tr><td colspan=\"4\">No lifecycle history yet</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="two-col">
       <div class="panel">
         <h2>High-Value Queries</h2>
@@ -619,6 +1181,177 @@ def render_value_row(item: dict[str, Any]) -> str:
         f"<td>{escape_html(item['status'])}</td>"
         "</tr>"
     )
+
+
+def render_evolution_summary_markdown(summary: dict[str, Any]) -> str:
+    headline = summary["headline"]
+    lines = [
+        "# Evolution Summary",
+        "",
+        "## Headline",
+        f"- Failure clusters: {headline['failure_cluster_count']}",
+        f"- LLM runs: {headline['llm_run_count']}",
+        f"- Reviews: {headline['reviewed_count']}",
+        f"- Accepted reviews: {headline['accepted_reviews']}",
+        f"- Needs revision: {headline['needs_revision_reviews']}",
+        f"- Accepted patches: {headline['accepted_patch_count']}",
+        "",
+        "## Management Summary",
+    ]
+    for item in summary["management_summary"]:
+        lines.append(f"- {item}")
+
+    lines.extend(["", "## Provider Scoreboard"])
+    if summary["provider_scoreboard"]:
+        for item in summary["provider_scoreboard"][:8]:
+            lines.append(
+                f"- `{item['provider_name']}` / `{item['provider_model']}` / `{item['stage']}`: "
+                f"runs={item['run_count']}, accepted={item['accepted_review_rate']}%, "
+                f"avg_prompt_tokens={item['avg_prompt_tokens']}"
+            )
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Cluster Scoreboard"])
+    if summary["cluster_scoreboard"]:
+        for item in summary["cluster_scoreboard"][:8]:
+            lines.append(
+                f"- `{item['cluster_id']}`: occurrences={item['occurrence_count']}, llm_runs={item['llm_runs']}, "
+                f"accepted={item['accepted_reviews']}, repairs={item['needs_revision_reviews']}, "
+                f"safe_patches={item['safe_patch_candidates']}"
+            )
+    else:
+        lines.append("- None")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_evolution_console_html(summary: dict[str, Any]) -> str:
+    headline = summary["headline"]
+    management_cards = "".join(f"<li>{escape_html(item)}</li>" for item in summary["management_summary"])
+    provider_rows = "".join(
+        f"<tr><td>{escape_html(item['provider_name'])}</td><td>{escape_html(item['provider_model'])}</td><td>{escape_html(item['stage'])}</td>"
+        f"<td>{item['run_count']}</td><td>{item['reviewed_runs']}</td><td>{item['accepted_review_rate']}%</td>"
+        f"<td>{item['avg_prompt_tokens']}</td><td>{item['avg_completion_tokens']}</td></tr>"
+        for item in summary["provider_scoreboard"][:12]
+    )
+    cluster_rows = "".join(
+        f"<tr><td>{escape_html(item['cluster_id'])}</td><td>{escape_html(item['task_type'])}</td><td>{item['occurrence_count']}</td>"
+        f"<td>{item['llm_runs']}</td><td>{item['accepted_reviews']}</td><td>{item['needs_revision_reviews']}</td>"
+        f"<td>{item['safe_patch_candidates']}</td></tr>"
+        for item in summary["cluster_scoreboard"][:12]
+    )
+    repair_rows = "".join(
+        f"<tr><td>{escape_html(item['cluster_id'])}</td><td>{item['needs_revision_reviews']}</td><td>{item['llm_runs']}</td></tr>"
+        for item in summary["repair_hotspots"][:8]
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Legacy SQL XML Analyzer Evolution Console</title>
+  <style>
+    :root {{
+      --bg: #f5f1e7;
+      --panel: #fffaf1;
+      --ink: #18202a;
+      --muted: #6b6f74;
+      --accent: #174b63;
+      --accent-2: #8f1d22;
+      --border: #d7c9b8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+      color: var(--ink);
+      background: linear-gradient(180deg, #faf5ed 0%, var(--bg) 100%);
+    }}
+    .wrap {{ max-width: 1280px; margin: 0 auto; padding: 32px 20px 56px; }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: 0 18px 40px rgba(24, 32, 42, 0.08);
+      margin-bottom: 16px;
+    }}
+    .metric-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }}
+    .metric {{
+      background: rgba(23, 75, 99, 0.06);
+      border-radius: 14px;
+      padding: 12px;
+    }}
+    .metric strong {{ display: block; font-size: 1.6rem; color: var(--accent); }}
+    .two-col {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; }}
+    th, td {{ padding: 10px 8px; border-bottom: 1px solid rgba(0, 0, 0, 0.08); text-align: left; vertical-align: top; }}
+    th {{ color: var(--muted); font-weight: 600; }}
+    ul {{ margin: 0; padding-left: 20px; line-height: 1.5; }}
+    .footer {{ margin-top: 18px; color: var(--muted); font-size: 0.9rem; }}
+    @media (max-width: 960px) {{ .two-col {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="panel">
+      <h1>Evolution Console</h1>
+      <p>Operator view for weak-LLM runs, review outcomes, repair loops, and candidate patch throughput.</p>
+      <div class="metric-grid">
+        <div class="metric"><strong>{headline['failure_cluster_count']}</strong><span>Failure Clusters</span></div>
+        <div class="metric"><strong>{headline['llm_run_count']}</strong><span>LLM Runs</span></div>
+        <div class="metric"><strong>{headline['reviewed_count']}</strong><span>Reviews</span></div>
+        <div class="metric"><strong>{headline['accepted_reviews']}</strong><span>Accepted</span></div>
+        <div class="metric"><strong>{headline['needs_revision_reviews']}</strong><span>Needs Revision</span></div>
+        <div class="metric"><strong>{headline['accepted_patch_count']}</strong><span>Accepted Patches</span></div>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="panel">
+        <h2>Management Summary</h2>
+        <ul>{management_cards}</ul>
+      </div>
+      <div class="panel">
+        <h2>Repair Hotspots</h2>
+        <table>
+          <thead>
+            <tr><th>Cluster</th><th>Needs Revision</th><th>LLM Runs</th></tr>
+          </thead>
+          <tbody>{repair_rows or '<tr><td colspan=\"3\">No repair hotspots yet</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Provider Scoreboard</h2>
+      <table>
+        <thead>
+          <tr><th>Provider</th><th>Model</th><th>Stage</th><th>Runs</th><th>Reviewed</th><th>Accepted</th><th>Avg Prompt Tokens</th><th>Avg Completion Tokens</th></tr>
+        </thead>
+        <tbody>{provider_rows or '<tr><td colspan=\"8\">No provider runs yet</td></tr>'}</tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Cluster Scoreboard</h2>
+      <table>
+        <thead>
+          <tr><th>Cluster</th><th>Task Type</th><th>Occurrences</th><th>LLM Runs</th><th>Accepted</th><th>Needs Revision</th><th>Safe Patches</th></tr>
+        </thead>
+        <tbody>{cluster_rows or '<tr><td colspan=\"7\">No cluster activity yet</td></tr>'}</tbody>
+      </table>
+      <div class="footer">Generated at {escape_html(summary['generated_at'])}</div>
+    </section>
+  </div>
+</body>
+</html>
+"""
 
 
 def artifact_descriptor_for_path(path: Path, kind: str, title: str, scope: str) -> ArtifactDescriptor:

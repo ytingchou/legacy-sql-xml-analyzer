@@ -10,6 +10,7 @@ from typing import Any
 from urllib import error, request
 
 from .analyzer import append_artifacts_to_index
+from .dashboard import write_evolution_report
 from .evolution import review_llm_response_from_analysis
 from .prompting import (
     artifact_descriptor_for_path,
@@ -160,7 +161,11 @@ def invoke_llm_from_analysis(
         summary_path.write_text(json.dumps(run_summary, indent=2, ensure_ascii=False), encoding="utf-8")
         summary_md_path.write_text(render_run_summary_markdown(run_summary), encoding="utf-8")
 
+    append_run_summary_to_index(run_root, summary_path, run_summary)
+    evolution_artifacts = write_evolution_report(analysis_root.parent)
+    all_artifacts.extend(evolution_artifacts)
     append_artifacts_to_index(analysis_root.parent, run_artifacts)
+    append_artifacts_to_index(analysis_root.parent, evolution_artifacts)
     return {
         "run_summary": run_summary,
         "response_text": response_text,
@@ -341,6 +346,28 @@ def build_request_artifact(config: OpenAICompatibleConfig, prompt_text: str) -> 
             "max_tokens": config.token_limit,
         },
     }
+
+
+def append_run_summary_to_index(run_root: Path, summary_path: Path, run_summary: dict[str, Any]) -> None:
+    index_path = run_root / "index.json"
+    payload = {"runs": []}
+    if index_path.exists():
+        try:
+            loaded = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+        except json.JSONDecodeError:
+            payload = {"runs": []}
+
+    payload.setdefault("runs", [])
+    indexed_summary = dict(run_summary)
+    indexed_summary["summary_path"] = str(summary_path)
+    runs = [item for item in payload["runs"] if isinstance(item, dict)]
+    runs = [item for item in runs if item.get("summary_path") != indexed_summary["summary_path"]]
+    runs.append(indexed_summary)
+    runs.sort(key=lambda item: str(item.get("generated_at") or ""))
+    payload["runs"] = runs
+    index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def render_run_summary_markdown(summary: dict[str, Any]) -> str:

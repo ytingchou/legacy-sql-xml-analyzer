@@ -10,7 +10,7 @@ from .evolution import (
     review_llm_response_from_analysis,
     simulate_candidate_profile,
 )
-from .lifecycle import grade_profile, promote_profile
+from .lifecycle import grade_profile, promote_profile, rollback_profile
 from .llm_provider import invoke_llm_from_analysis
 from .learning import freeze_profile, infer_rules, learn_directory
 from .prompting import prepare_prompt_pack_from_analysis
@@ -149,6 +149,16 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--grade-report", required=True, type=Path, help="profile_grade.json or a directory that contains it.")
     promote_parser.add_argument("--output", required=True, type=Path, help="Output path for the promoted profile JSON.")
     promote_parser.add_argument("--profile-name", help="Optional profile display name to stamp into the promoted profile.")
+
+    rollback_parser = subparsers.add_parser(
+        "rollback-profile",
+        help="Rollback a promoted profile to its parent profile or an explicit target profile.",
+    )
+    rollback_parser.add_argument("--profile", required=True, type=Path, help="Current promoted profile JSON to rollback from.")
+    rollback_parser.add_argument("--output", required=True, type=Path, help="Output path for the rolled-back profile JSON.")
+    rollback_parser.add_argument("--target-profile", type=Path, help="Optional explicit rollback target profile JSON. Defaults to parent_profile.")
+    rollback_parser.add_argument("--reason", help="Optional rollback reason to stamp into lifecycle history.")
+    rollback_parser.add_argument("--profile-name", help="Optional profile display name for the rolled-back profile.")
     return parser
 
 
@@ -344,6 +354,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             f"Promoted profile to status={profile.profile_status} with {len(profile.validation_history)} validation record(s)."
+        )
+        return 0
+
+    if args.command == "rollback-profile":
+        profile = rollback_profile(
+            profile_path=args.profile.resolve(),
+            output_path=args.output.resolve(),
+            target_profile_path=args.target_profile.resolve() if args.target_profile else None,
+            reason=args.reason,
+            profile_name=args.profile_name,
+        )
+        print(
+            f"Rolled back profile to status={profile.profile_status} with {len(profile.lifecycle_history)} lifecycle event(s)."
         )
         return 0
 

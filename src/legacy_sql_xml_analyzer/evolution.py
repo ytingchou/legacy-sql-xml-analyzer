@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .analyzer import append_artifacts_to_index
+from .dashboard import write_evolution_report
 from .learning import AnalysisProfile, ProfileRule, load_profile
 from .prompting import (
     PROMPT_STAGES,
@@ -95,11 +96,13 @@ def review_llm_response_from_analysis(
             artifact_descriptor_for_path(patch_path, "json", f"Profile patch candidate ({stage}): {cluster_id}", "prompting")
         )
 
+    evolution_artifacts = write_evolution_report(analysis_root.parent)
     append_artifacts_to_index(analysis_root.parent, artifacts)
+    append_artifacts_to_index(analysis_root.parent, evolution_artifacts)
     return {
         "cluster": cluster,
         "review": review,
-        "artifacts": artifacts,
+        "artifacts": artifacts + evolution_artifacts,
     }
 
 
@@ -759,12 +762,14 @@ def propose_rules_from_analysis(
         artifact_descriptor_for_path(candidate_profile_path, "json", "Candidate profile", "profile"),
         artifact_descriptor_for_path(candidate_profile_md_path, "markdown", "Candidate profile summary", "profile"),
     ]
+    evolution_artifacts = write_evolution_report(analysis_root.parent)
     append_artifacts_to_index(analysis_root.parent, artifacts)
+    append_artifacts_to_index(analysis_root.parent, evolution_artifacts)
     return {
         "proposal_payload": proposal_payload,
         "candidate_profile": merged_profile,
         "candidate_profile_path": candidate_profile_path,
-        "artifacts": artifacts,
+        "artifacts": artifacts + evolution_artifacts,
     }
 
 

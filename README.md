@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v0.10.0`
+Current local release: `v1.0.0`
 
 ## Usage
 
@@ -52,10 +52,19 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/executive_summary.json`: machine-readable management summary, complexity hotspots, and value hotspots
 - `analysis/executive_summary.md`: concise report for status updates and leadership reviews
 - `analysis/dashboard.html`: static web dashboard for browsing results in a browser
+- `analysis/evolution_summary.json`: machine-readable weak-LLM evolution and prompt effectiveness summary
+- `analysis/evolution_summary.md`: concise operator summary for weak-LLM throughput and repair loops
+- `analysis/evolution_console.html`: static web console for LLM runs, review outcomes, and repair hotspots
 - `analysis/executive_complexity.csv`: spreadsheet-ready complexity hotspot export
 - `analysis/executive_value.csv`: spreadsheet-ready value hotspot export
 - `analysis/executive_diagnostics.csv`: spreadsheet-ready diagnostic hotspot export
 - `analysis/executive_trend.csv`: spreadsheet-ready run trend export
+- `analysis/llm_effectiveness.csv`: spreadsheet-ready provider/stage effectiveness export
+- `analysis/profile_lifecycle.csv`: spreadsheet-ready lifecycle event export for the active profile
+- `analysis/prompt_scoreboard.json`: machine-readable provider/stage prompt scoreboard
+- `analysis/prompt_scoreboard.csv`: spreadsheet-ready provider/stage prompt scoreboard
+- `analysis/schema/artifact_catalog.json`: stable machine-readable artifact contract catalog
+- `analysis/schema/artifact_catalog.md`: human-readable artifact contract catalog
 - `analysis/failure_clusters.json`: grouped diagnostic families for repeated issues
 - `analysis/failure_clusters.md`: human-readable failure family summary
 - `analysis/prompt_packs/*.txt`: staged weak-LLM prompt packs (`classify`, `propose`, `verify`) plus a backward-compatible propose alias
@@ -184,12 +193,23 @@ Promote the profile to its next lifecycle state:
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer promote-profile --profile ./analysis-output/analysis/proposals/candidate_profile.json --grade-report ./grade-output/grade/profile_grade.json --output ./profiles/promoted_profile.json --profile-name company-candidate
 ```
 
+Rollback to the parent profile after a regression:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer rollback-profile --profile ./profiles/promoted_profile.json --output ./profiles/rollback_profile.json --reason "Regression detected during validation"
+```
+
 Lifecycle states currently supported:
 
 - `candidate`: newly inferred or patched profile, not yet trusted
 - `trial`: profile has demonstrated at least one meaningful improvement
 - `trusted`: profile has repeated successful improvements without regressions
 - `deprecated`: profile regressed and should not remain active
+
+Profile promotion and rollback now also emit sibling history files:
+
+- `*.history.json`: machine-readable validation and lifecycle timeline
+- `*.history.md`: concise human-readable lifecycle summary
 
 If you keep reusing the same `--output` directory across runs, the executive dashboard will also show trend direction and recent snapshot comparisons.
 

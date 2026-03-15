@@ -19,7 +19,7 @@ from legacy_sql_xml_analyzer.evolution import (
     review_llm_response_from_analysis,
     simulate_candidate_profile,
 )
-from legacy_sql_xml_analyzer.lifecycle import grade_profile, promote_profile
+from legacy_sql_xml_analyzer.lifecycle import grade_profile, promote_profile, rollback_profile
 from legacy_sql_xml_analyzer.llm_provider import invoke_llm_from_analysis
 from legacy_sql_xml_analyzer.learning import freeze_profile, infer_rules, learn_directory
 from legacy_sql_xml_analyzer.prompting import prepare_prompt_pack_from_analysis
@@ -88,11 +88,21 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             index_path = output_dir / "analysis" / "index.json"
             executive_summary_path = output_dir / "analysis" / "executive_summary.json"
             executive_dashboard_path = output_dir / "analysis" / "dashboard.html"
+            evolution_summary_path = output_dir / "analysis" / "evolution_summary.json"
+            evolution_console_path = output_dir / "analysis" / "evolution_console.html"
+            llm_effectiveness_path = output_dir / "analysis" / "llm_effectiveness.csv"
+            profile_lifecycle_path = output_dir / "analysis" / "profile_lifecycle.csv"
+            artifact_catalog_path = output_dir / "analysis" / "schema" / "artifact_catalog.json"
             overview_path = output_dir / "analysis" / "markdown" / "overview.md"
             query_card = output_dir / "analysis" / "markdown" / "queries" / "main.xml_main_PriceCheck.md"
             self.assertTrue(index_path.exists())
             self.assertTrue(executive_summary_path.exists())
             self.assertTrue(executive_dashboard_path.exists())
+            self.assertTrue(evolution_summary_path.exists())
+            self.assertTrue(evolution_console_path.exists())
+            self.assertTrue(llm_effectiveness_path.exists())
+            self.assertTrue(profile_lifecycle_path.exists())
+            self.assertTrue(artifact_catalog_path.exists())
             self.assertTrue(overview_path.exists())
             self.assertTrue(query_card.exists())
 
@@ -944,6 +954,182 @@ class AnalyzerIntegrationTests(unittest.TestCase):
             self.assertEqual("trusted", grade_result["grade_payload"]["suggested_status"])
             self.assertEqual("promote", grade_result["grade_payload"]["promotion_readiness"])
 
+    def test_rollback_profile_restores_parent_profile_and_writes_history_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            parent_profile_path = root / "profiles" / "candidate_profile.json"
+            promoted_profile_path = root / "profiles" / "trusted_profile.json"
+            rolled_back_profile_path = root / "profiles" / "rollback_profile.json"
+            parent_profile_path.parent.mkdir(parents=True)
+
+            parent_profile_path.write_text(
+                json.dumps(
+                    {
+                        "profile_version": 1,
+                        "profile_name": "candidate-profile",
+                        "profile_status": "candidate",
+                        "reference_target_default_order": ["sub", "main"],
+                        "reference_token_patterns": ["{name}"],
+                        "external_xml_name_map": {"shared": "shared-query.xml"},
+                        "external_xml_scoped_map": {},
+                        "ignore_tags": ["custom-node"],
+                        "rules": [],
+                        "validation_history": [],
+                        "lifecycle_history": [],
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            promoted_profile_path.write_text(
+                json.dumps(
+                    {
+                        "profile_version": 2,
+                        "profile_name": "trusted-profile",
+                        "profile_status": "trusted",
+                        "parent_profile": str(parent_profile_path.resolve()),
+                        "reference_target_default_order": ["main", "sub"],
+                        "reference_token_patterns": ["{name}", "/*{name}*/"],
+                        "external_xml_name_map": {"shared": "shared-query.xml", "extra": "extra.xml"},
+                        "external_xml_scoped_map": {},
+                        "ignore_tags": ["custom-node", "vendor-node"],
+                        "rules": [],
+                        "validation_history": [
+                            {
+                                "assessment_classification": "improved",
+                                "suggested_status": "trial",
+                                "promotion_readiness": "promote",
+                            }
+                        ],
+                        "lifecycle_history": [
+                            {
+                                "event_type": "promote",
+                                "from_status": "candidate",
+                                "to_status": "trusted",
+                            }
+                        ],
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            rolled_back = rollback_profile(
+                profile_path=promoted_profile_path,
+                output_path=rolled_back_profile_path,
+                reason="Regression found during validation.",
+                profile_name="rolled-back-profile",
+            )
+
+            self.assertEqual("candidate", rolled_back.profile_status)
+            self.assertEqual("rolled-back-profile", rolled_back.profile_name)
+            self.assertEqual({"shared": "shared-query.xml"}, rolled_back.external_xml_name_map)
+            self.assertEqual("Regression found during validation.", rolled_back.lifecycle_history[-1]["reason"])
+            self.assertTrue((root / "profiles" / "rollback_profile.history.json").exists())
+            self.assertTrue((root / "profiles" / "rollback_profile.history.md").exists())
+
+    def test_invoke_llm_generates_evolution_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            provider_config_path = root / "provider.json"
+            input_dir.mkdir()
+
+            (input_dir / "shared-query.xml").write_text(
+                """<sql-mapping>
+  <main-query name="SharedMain">
+    <sql-body><![CDATA[
+      select * from shared_table
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "consumer.xml").write_text(
+                """<sql-mapping>
+  <main-query name="ConsumerMain">
+    <ext-sql-refer-to name="__EXT__" xml="shared" main-query="SharedMain" />
+    <sql-body><![CDATA[
+      select * from dual __EXT__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir)
+            provider_config_path.write_text(
+                json.dumps(
+                    {
+                        "name": "company-weak-llm",
+                        "base_url": "https://provider.example.com/v1",
+                        "model": "weak-128k",
+                        "api_key": "test-key",
+                        "token_limit": 1024,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            fake_response = {
+                "id": "resp-123",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "cluster_id": "reference_target_missing",
+                                    "problem_type": "mapping_inference",
+                                    "root_cause": "shared should map to shared-query.xml",
+                                    "proposed_change_type": "profile_rule",
+                                    "proposed_rule_or_fix": {
+                                        "rule_type": "external_xml_name_mapping",
+                                        "scope": "global",
+                                        "payload": {"xml_name": "shared", "mapped_to": "shared-query.xml"},
+                                    },
+                                    "confidence": "high",
+                                    "why": ["Observed consistently."],
+                                    "verification_steps": ["Run simulate-profile."],
+                                    "risks": ["Low."],
+                                    "insufficient_evidence": False,
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ],
+                "usage": {"completion_tokens": 123},
+            }
+
+            with mock.patch(
+                "legacy_sql_xml_analyzer.llm_provider._post_json",
+                return_value=fake_response,
+            ):
+                invoke_llm_from_analysis(
+                    analysis_root=output_dir,
+                    cluster_id="reference_target_missing",
+                    provider_config_path=provider_config_path,
+                    review=True,
+                )
+
+            evolution_payload = json.loads(
+                (output_dir / "analysis" / "evolution_summary.json").read_text(encoding="utf-8")
+            )
+            scoreboard_payload = json.loads(
+                (output_dir / "analysis" / "prompt_scoreboard.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(1, evolution_payload["headline"]["llm_run_count"])
+            self.assertEqual(1, evolution_payload["headline"]["accepted_reviews"])
+            self.assertTrue(scoreboard_payload)
+            self.assertEqual("company-weak-llm", scoreboard_payload[0]["provider_name"])
+            self.assertTrue((output_dir / "analysis" / "evolution_console.html").exists())
+
     def test_invoke_llm_uses_openai_compatible_provider_and_token_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1054,7 +1240,8 @@ class AnalyzerIntegrationTests(unittest.TestCase):
 
             llm_runs_root = output_dir / "analysis" / "llm_runs"
             self.assertTrue(any(path.is_dir() for path in llm_runs_root.iterdir()))
-            latest_run = sorted(llm_runs_root.iterdir())[-1]
+            self.assertTrue((llm_runs_root / "index.json").exists())
+            latest_run = sorted(path for path in llm_runs_root.iterdir() if path.is_dir())[-1]
             summary_payload = json.loads((latest_run / "run_summary.json").read_text(encoding="utf-8"))
             request_payload = json.loads((latest_run / "request.json").read_text(encoding="utf-8"))
             self.assertEqual(777, summary_payload["token_limit"])

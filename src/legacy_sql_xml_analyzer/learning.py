@@ -58,6 +58,7 @@ class AnalysisProfile:
     ignore_tags: list[str] = field(default_factory=list)
     rules: list[ProfileRule] = field(default_factory=list)
     validation_history: list[dict[str, Any]] = field(default_factory=list)
+    lifecycle_history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +75,7 @@ class AnalysisProfile:
             "ignore_tags": self.ignore_tags,
             "rules": [rule.to_dict() for rule in self.rules],
             "validation_history": self.validation_history,
+            "lifecycle_history": self.lifecycle_history,
         }
 
     @classmethod
@@ -114,6 +116,9 @@ class AnalysisProfile:
             rules=rules,
             validation_history=[
                 item for item in payload.get("validation_history", []) if isinstance(item, dict)
+            ],
+            lifecycle_history=[
+                item for item in payload.get("lifecycle_history", []) if isinstance(item, dict)
             ],
         )
 

@@ -67,9 +67,65 @@ def promote_profile(
             "warning_delta": grade_payload["latest_delta"].get("warning_delta", 0),
         }
     )
+    promoted.lifecycle_history.append(
+        build_lifecycle_event(
+            event_type="promote",
+            from_status=profile.profile_status,
+            to_status=promoted.profile_status,
+            source_profile_path=profile_path,
+            target_profile_path=output_path,
+            grade_payload=grade_payload,
+        )
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(promoted.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    write_profile_history_sidecars(promoted, output_path)
     return promoted
+
+
+def rollback_profile(
+    profile_path: Path,
+    output_path: Path,
+    target_profile_path: Path | None = None,
+    reason: str | None = None,
+    profile_name: str | None = None,
+) -> AnalysisProfile:
+    current_profile = load_profile(profile_path)
+    if current_profile is None:
+        raise ValueError(f"Could not load profile from {profile_path}")
+
+    resolved_target_path = target_profile_path
+    if resolved_target_path is None:
+        parent = str(current_profile.parent_profile or "").strip()
+        if not parent:
+            raise ValueError("Current profile does not declare parent_profile, so rollback needs --target-profile.")
+        resolved_target_path = Path(parent)
+    if not resolved_target_path.exists():
+        raise FileNotFoundError(f"Rollback target profile does not exist: {resolved_target_path}")
+
+    target_profile = load_profile(resolved_target_path)
+    if target_profile is None:
+        raise ValueError(f"Could not load rollback target profile from {resolved_target_path}")
+
+    rolled_back = AnalysisProfile.from_dict(target_profile.to_dict())
+    rolled_back.profile_version = max(current_profile.profile_version, target_profile.profile_version) + 1
+    rolled_back.generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    rolled_back.profile_name = profile_name or current_profile.profile_name or target_profile.profile_name or output_path.stem
+    rolled_back.parent_profile = str(resolved_target_path.resolve())
+    rolled_back.lifecycle_history.append(
+        build_lifecycle_event(
+            event_type="rollback",
+            from_status=current_profile.profile_status,
+            to_status=rolled_back.profile_status,
+            source_profile_path=profile_path,
+            target_profile_path=resolved_target_path,
+            reason=reason,
+        )
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(rolled_back.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    write_profile_history_sidecars(rolled_back, output_path)
+    return rolled_back
 
 
 def build_grade_payload(
@@ -91,6 +147,7 @@ def build_grade_payload(
         history_counts=history_counts,
     )
     latest_delta = validation_payload.get("delta", {})
+    rollback_recommendation = build_rollback_recommendation(profile, latest_classification)
     return {
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "profile_path": str(profile_path.resolve()),
@@ -113,6 +170,7 @@ def build_grade_payload(
             "error_delta": latest_delta.get("error_delta", 0),
             "warning_delta": latest_delta.get("warning_delta", 0),
         },
+        "rollback_recommendation": rollback_recommendation,
         "reasoning": reasoning,
     }
 
@@ -192,6 +250,71 @@ def resolve_json_report_path(path: Path) -> Path:
     raise FileNotFoundError(f"Could not resolve a JSON report under {path}")
 
 
+def build_rollback_recommendation(profile: AnalysisProfile, latest_classification: str) -> dict[str, Any]:
+    parent_profile = str(profile.parent_profile or "").strip()
+    parent_exists = bool(parent_profile) and Path(parent_profile).exists()
+    should_rollback = latest_classification == "regressed" and parent_exists
+    reason = None
+    if latest_classification == "regressed":
+        if parent_exists:
+            reason = "Latest validation regressed and the profile has a recoverable parent_profile."
+        else:
+            reason = "Latest validation regressed, but no readable parent_profile is available for automatic rollback."
+    return {
+        "should_rollback": should_rollback,
+        "target_profile_path": parent_profile or None,
+        "target_profile_exists": parent_exists,
+        "reason": reason,
+    }
+
+
+def build_lifecycle_event(
+    event_type: str,
+    from_status: str,
+    to_status: str,
+    source_profile_path: Path,
+    target_profile_path: Path,
+    grade_payload: dict[str, Any] | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    event = {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "event_type": event_type,
+        "from_status": from_status,
+        "to_status": to_status,
+        "source_profile_path": str(source_profile_path.resolve()),
+        "target_profile_path": str(target_profile_path.resolve()),
+    }
+    if grade_payload is not None:
+        event["grade_report_path"] = grade_payload.get("validation_report_path")
+        event["assessment_classification"] = grade_payload.get("assessment", {}).get("classification")
+        event["promotion_readiness"] = grade_payload.get("promotion_readiness")
+    if reason:
+        event["reason"] = reason
+    return event
+
+
+def write_profile_history_sidecars(profile: AnalysisProfile, output_path: Path) -> None:
+    history_json_path = output_path.with_name(f"{output_path.stem}.history.json")
+    history_md_path = output_path.with_name(f"{output_path.stem}.history.md")
+    payload = build_profile_history_payload(profile, output_path)
+    history_json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    history_md_path.write_text(render_profile_history_markdown(payload), encoding="utf-8")
+
+
+def build_profile_history_payload(profile: AnalysisProfile, output_path: Path) -> dict[str, Any]:
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "profile_path": str(output_path.resolve()),
+        "profile_name": profile.profile_name,
+        "profile_status": profile.profile_status,
+        "profile_version": profile.profile_version,
+        "parent_profile": profile.parent_profile,
+        "validation_history": profile.validation_history,
+        "lifecycle_history": profile.lifecycle_history,
+    }
+
+
 def render_profile_grade_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Profile Grade",
@@ -214,8 +337,50 @@ def render_profile_grade_markdown(payload: dict[str, Any]) -> str:
         f"- Error delta: {payload['latest_delta']['error_delta']:+d}",
         f"- Warning delta: {payload['latest_delta']['warning_delta']:+d}",
         "",
+        "## Rollback Recommendation",
+        f"- Should rollback: {payload['rollback_recommendation']['should_rollback']}",
+        f"- Target profile: {payload['rollback_recommendation']['target_profile_path'] or 'none'}",
+        f"- Reason: {payload['rollback_recommendation']['reason'] or 'none'}",
+        "",
         "## Reasoning",
     ]
     for item in payload["reasoning"]:
         lines.append(f"- {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_profile_history_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Profile History",
+        "",
+        "## Summary",
+        f"- Profile: `{payload['profile_name'] or Path(payload['profile_path']).stem}`",
+        f"- Status: `{payload['profile_status']}`",
+        f"- Version: {payload['profile_version']}",
+        f"- Parent profile: {payload['parent_profile'] or 'none'}",
+        f"- Validation records: {len(payload['validation_history'])}",
+        f"- Lifecycle events: {len(payload['lifecycle_history'])}",
+        "",
+        "## Lifecycle Events",
+    ]
+    if payload["lifecycle_history"]:
+        for item in payload["lifecycle_history"]:
+            lines.append(
+                f"- `{item.get('event_type', 'unknown')}` {item.get('from_status', 'n/a')} -> {item.get('to_status', 'n/a')} "
+                f"at {item.get('generated_at', 'n/a')}"
+            )
+            if item.get("reason"):
+                lines.append(f"  reason: {item['reason']}")
+    else:
+        lines.append("- None")
+
+    lines.extend(["", "## Validation History"])
+    if payload["validation_history"]:
+        for item in payload["validation_history"]:
+            lines.append(
+                f"- `{item.get('assessment_classification', 'n/a')}` suggested={item.get('suggested_status', 'n/a')} "
+                f"readiness={item.get('promotion_readiness', 'n/a')}"
+            )
+    else:
+        lines.append("- None")
     return "\n".join(lines).rstrip() + "\n"

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from xml.etree import ElementTree as ET
 
+from .catalog import write_artifact_catalog
 from .dashboard import write_executive_report
 from .learning import AnalysisProfile, load_profile
 from .models import (
@@ -882,6 +883,12 @@ def analyze_directory(
     )
     result.artifacts.extend(history_artifacts)
     append_artifacts_to_index(output_dir, history_artifacts)
+    prompting_artifacts = write_failure_clusters(
+        output_dir=output_dir,
+        result=result,
+    )
+    result.artifacts.extend(prompting_artifacts)
+    append_artifacts_to_index(output_dir, prompting_artifacts)
     executive_artifacts = write_executive_report(
         output_dir=output_dir,
         result=result,
@@ -889,12 +896,9 @@ def analyze_directory(
     )
     result.artifacts.extend(executive_artifacts)
     append_artifacts_to_index(output_dir, executive_artifacts)
-    prompting_artifacts = write_failure_clusters(
-        output_dir=output_dir,
-        result=result,
-    )
-    result.artifacts.extend(prompting_artifacts)
-    append_artifacts_to_index(output_dir, prompting_artifacts)
+    catalog_artifacts = write_artifact_catalog(output_dir=output_dir)
+    result.artifacts.extend(catalog_artifacts)
+    append_artifacts_to_index(output_dir, catalog_artifacts)
     return result
 
 

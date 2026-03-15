@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0 - 2026-03-15
+
+- Added `rollback-profile` so promoted profiles can safely revert to their parent or an explicit target profile after regressions.
+- Added lifecycle sidecar artifacts (`*.history.json` and `*.history.md`) for promoted and rolled-back profiles.
+- Added rollback recommendations to `grade-profile` output when a regressed profile still has a recoverable parent profile.
+- Added `analysis/evolution_summary.*`, `analysis/prompt_scoreboard.*`, `analysis/evolution_console.html`, `analysis/llm_effectiveness.csv`, and `analysis/profile_lifecycle.csv`.
+- Added `analysis/schema/artifact_catalog.*` so humans, automation, and weaker LLMs can rely on stable artifact contracts.
+- Expanded the executive dashboard with LLM evolution, provider scoreboard, and profile lifecycle sections.
+- Added tests covering rollback behavior, lifecycle history artifacts, and automatic evolution report generation.
+
 ## 0.10.0 - 2026-03-15
 
 - Added `invoke-llm` for direct OpenAI-compatible `/chat/completions` provider integration using staged prompt packs.
