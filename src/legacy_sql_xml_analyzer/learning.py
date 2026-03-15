@@ -46,6 +46,9 @@ class ProfileRule:
 @dataclass(slots=True)
 class AnalysisProfile:
     profile_version: int = 1
+    profile_name: str | None = None
+    profile_status: str = "candidate"
+    parent_profile: str | None = None
     generated_at: str | None = None
     source_observation_digest: str | None = None
     reference_target_default_order: list[str] = field(default_factory=lambda: ["sub", "main"])
@@ -54,10 +57,14 @@ class AnalysisProfile:
     external_xml_scoped_map: dict[str, str] = field(default_factory=dict)
     ignore_tags: list[str] = field(default_factory=list)
     rules: list[ProfileRule] = field(default_factory=list)
+    validation_history: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "profile_version": self.profile_version,
+            "profile_name": self.profile_name,
+            "profile_status": self.profile_status,
+            "parent_profile": self.parent_profile,
             "generated_at": self.generated_at,
             "source_observation_digest": self.source_observation_digest,
             "reference_target_default_order": self.reference_target_default_order,
@@ -66,6 +73,7 @@ class AnalysisProfile:
             "external_xml_scoped_map": self.external_xml_scoped_map,
             "ignore_tags": self.ignore_tags,
             "rules": [rule.to_dict() for rule in self.rules],
+            "validation_history": self.validation_history,
         }
 
     @classmethod
@@ -89,6 +97,9 @@ class AnalysisProfile:
             token_patterns = ["{name}"]
         return cls(
             profile_version=int(payload.get("profile_version", 1)),
+            profile_name=payload.get("profile_name"),
+            profile_status=normalize_profile_status(payload.get("profile_status")),
+            parent_profile=payload.get("parent_profile"),
             generated_at=payload.get("generated_at"),
             source_observation_digest=payload.get("source_observation_digest"),
             reference_target_default_order=order,
@@ -101,6 +112,9 @@ class AnalysisProfile:
             },
             ignore_tags=sorted({str(item) for item in payload.get("ignore_tags", [])}),
             rules=rules,
+            validation_history=[
+                item for item in payload.get("validation_history", []) if isinstance(item, dict)
+            ],
         )
 
 
@@ -667,6 +681,13 @@ def render_rule_summary(profile: AnalysisProfile) -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def normalize_profile_status(value: Any) -> str:
+    status = str(value or "candidate").strip().lower()
+    if status not in {"candidate", "trial", "trusted", "deprecated"}:
+        return "candidate"
+    return status
 
 
 def dedupe_preserve_order(values: list[str]) -> list[str]:

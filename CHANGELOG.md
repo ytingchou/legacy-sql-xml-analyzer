@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0 - 2026-03-15
+
+- Added lifecycle metadata to profiles, including status, parent profile, display name, and validation history.
+- Added `grade-profile` to turn simulation or validation results into a lifecycle recommendation such as `trial` or `trusted`.
+- Added `promote-profile` to stamp lifecycle state and validation history into a new promoted profile JSON.
+- Added tests covering candidate-to-trial promotion and repeated-improvement promotion to trusted.
+
 ## 0.8.0 - 2026-03-15
 
 - Added `propose-rules` to collect accepted reviewed weak-LLM patch candidates and build a merged candidate profile.

@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v0.8.0`
+Current local release: `v0.9.0`
 
 ## Usage
 
@@ -64,6 +64,8 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/llm_reviews/*.md`: human-readable review summaries for weak-LLM responses
 - `analysis/proposals/rule_proposals.json`: accepted patch candidates collected from reviewed weak-LLM answers
 - `analysis/proposals/candidate_profile.json`: merged candidate profile generated from accepted patch candidates
+- `grade/profile_grade.json`: lifecycle grading for a candidate or promoted profile
+- `grade/profile_grade.md`: human-readable lifecycle grading summary
 
 Validate whether a frozen profile is actually helping:
 
@@ -131,6 +133,25 @@ This new promotion workflow is intended to be:
 - `review-llm-response`: validate weak-model output and produce safe patch candidates
 - `propose-rules`: collect only accepted, safe, high-confidence patch candidates
 - `simulate-profile`: compare the candidate profile against baseline before any manual promotion
+
+Grade a profile lifecycle state from a validation or simulation report:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer grade-profile --profile ./analysis-output/analysis/proposals/candidate_profile.json --report ./simulation-output/simulation/profile_simulation.json --output ./grade-output
+```
+
+Promote the profile to its next lifecycle state:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer promote-profile --profile ./analysis-output/analysis/proposals/candidate_profile.json --grade-report ./grade-output/grade/profile_grade.json --output ./profiles/promoted_profile.json --profile-name company-candidate
+```
+
+Lifecycle states currently supported:
+
+- `candidate`: newly inferred or patched profile, not yet trusted
+- `trial`: profile has demonstrated at least one meaningful improvement
+- `trusted`: profile has repeated successful improvements without regressions
+- `deprecated`: profile regressed and should not remain active
 
 If you keep reusing the same `--output` directory across runs, the executive dashboard will also show trend direction and recent snapshot comparisons.
 

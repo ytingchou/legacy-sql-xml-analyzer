@@ -724,6 +724,8 @@ def propose_rules_from_analysis(
         include_needs_review=include_needs_review,
     )
     merged_profile = merge_patch_candidates(base_profile, accepted_candidates)
+    merged_profile.profile_status = "candidate"
+    merged_profile.parent_profile = str(profile_path.resolve()) if profile_path else merged_profile.parent_profile
 
     proposal_payload = {
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -775,6 +777,8 @@ def apply_profile_patch_bundle(
     accepted_candidates = [item for item in payload.get("accepted_patches", []) if isinstance(item, dict)]
     base_profile = load_profile(profile_path) if profile_path else None
     merged_profile = merge_patch_candidates(base_profile, accepted_candidates)
+    merged_profile.profile_status = "candidate"
+    merged_profile.parent_profile = str(profile_path.resolve()) if profile_path else merged_profile.parent_profile
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(merged_profile.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
     return merged_profile

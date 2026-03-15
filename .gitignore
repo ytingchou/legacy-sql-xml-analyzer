@@ -8,3 +8,4 @@ dist/
 analysis/
 learning/
 profiles/
+.DS_Store

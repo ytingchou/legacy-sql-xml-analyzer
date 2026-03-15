@@ -10,6 +10,7 @@ from .evolution import (
     review_llm_response_from_analysis,
     simulate_candidate_profile,
 )
+from .lifecycle import grade_profile, promote_profile
 from .learning import freeze_profile, infer_rules, learn_directory
 from .prompting import prepare_prompt_pack_from_analysis
 from .validation import validate_profile
@@ -109,6 +110,23 @@ def build_parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--candidate-profile", type=Path, help="Optional explicit candidate_profile.json path.")
     simulate_parser.add_argument("--entry-file", help="Optional XML filename to emphasize in simulation.")
     simulate_parser.add_argument("--entry-main-query", help="Optional main-query name to emphasize in simulation.")
+
+    grade_parser = subparsers.add_parser(
+        "grade-profile",
+        help="Grade a profile lifecycle state from a validation or simulation report.",
+    )
+    grade_parser.add_argument("--profile", required=True, type=Path, help="Profile JSON to grade.")
+    grade_parser.add_argument("--report", required=True, type=Path, help="profile_validation.json, profile_simulation.json, or a directory that contains one.")
+    grade_parser.add_argument("--output", required=True, type=Path, help="Output directory for grade artifacts.")
+
+    promote_parser = subparsers.add_parser(
+        "promote-profile",
+        help="Promote a profile to its next lifecycle state using a grade report.",
+    )
+    promote_parser.add_argument("--profile", required=True, type=Path, help="Profile JSON to promote.")
+    promote_parser.add_argument("--grade-report", required=True, type=Path, help="profile_grade.json or a directory that contains it.")
+    promote_parser.add_argument("--output", required=True, type=Path, help="Output path for the promoted profile JSON.")
+    promote_parser.add_argument("--profile-name", help="Optional profile display name to stamp into the promoted profile.")
     return parser
 
 
@@ -252,6 +270,31 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Simulated candidate profile with classification={result['assessment']['classification']}, "
             f"generated {len(result['artifacts'])} artifact(s)."
+        )
+        return 0
+
+    if args.command == "grade-profile":
+        result = grade_profile(
+            profile_path=args.profile.resolve(),
+            validation_report_path=args.report.resolve(),
+            output_dir=args.output.resolve(),
+        )
+        payload = result["grade_payload"]
+        print(
+            f"Graded profile status={payload['current_status']} -> {payload['suggested_status']}, "
+            f"readiness={payload['promotion_readiness']}, generated {len(result['artifacts'])} artifact(s)."
+        )
+        return 0
+
+    if args.command == "promote-profile":
+        profile = promote_profile(
+            profile_path=args.profile.resolve(),
+            grade_report_path=args.grade_report.resolve(),
+            output_path=args.output.resolve(),
+            profile_name=args.profile_name,
+        )
+        print(
+            f"Promoted profile to status={profile.profile_status} with {len(profile.validation_history)} validation record(s)."
         )
         return 0
 

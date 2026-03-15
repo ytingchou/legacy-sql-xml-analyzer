@@ -18,6 +18,7 @@ from legacy_sql_xml_analyzer.evolution import (
     review_llm_response_from_analysis,
     simulate_candidate_profile,
 )
+from legacy_sql_xml_analyzer.lifecycle import grade_profile, promote_profile
 from legacy_sql_xml_analyzer.learning import freeze_profile, infer_rules, learn_directory
 from legacy_sql_xml_analyzer.prompting import prepare_prompt_pack_from_analysis
 from legacy_sql_xml_analyzer.validation import validate_profile
@@ -787,6 +788,159 @@ class AnalyzerIntegrationTests(unittest.TestCase):
                 simulation_payload["validation_payload"]["delta"]["resolved_queries_delta"],
                 0,
             )
+
+    def test_grade_and_promote_profile_after_simulation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            simulation_output_dir = root / "simulation-output"
+            grade_output_dir = root / "grade-output"
+            promoted_profile_path = root / "profiles" / "promoted_profile.json"
+            response_path = root / "response.json"
+            input_dir.mkdir()
+
+            (input_dir / "shared-query.xml").write_text(
+                """<sql-mapping>
+  <main-query name="SharedMain">
+    <sql-body><![CDATA[
+      select * from shared_table
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+            (input_dir / "consumer.xml").write_text(
+                """<sql-mapping>
+  <main-query name="ConsumerMain">
+    <ext-sql-refer-to name="__EXT__" xml="shared" main-query="SharedMain" />
+    <sql-body><![CDATA[
+      select * from dual __EXT__
+    ]]></sql-body>
+  </main-query>
+</sql-mapping>
+""",
+                encoding="utf-8",
+            )
+
+            analyze_directory(input_dir=input_dir, output_dir=output_dir)
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "cluster_id": "reference_target_missing",
+                        "problem_type": "mapping_inference",
+                        "root_cause": "The alias shared should map to shared-query.xml.",
+                        "proposed_change_type": "profile_rule",
+                        "proposed_rule_or_fix": {
+                            "rule_type": "external_xml_name_mapping",
+                            "scope": "global",
+                            "payload": {
+                                "xml_name": "shared",
+                                "mapped_to": "shared-query.xml",
+                            },
+                        },
+                        "confidence": "high",
+                        "why": ["The alias is consistent across the observed failure cluster."],
+                        "verification_steps": ["Run analyze with the candidate profile."],
+                        "risks": ["Another module could reuse the alias differently."],
+                        "insufficient_evidence": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            review_llm_response_from_analysis(
+                analysis_root=output_dir,
+                cluster_id="reference_target_missing",
+                response_path=response_path,
+                stage="propose",
+            )
+            proposal_result = propose_rules_from_analysis(analysis_root=output_dir, min_confidence=0.7)
+            candidate_profile_path = proposal_result["candidate_profile_path"]
+            simulate_candidate_profile(
+                input_dir=input_dir,
+                output_dir=simulation_output_dir,
+                analysis_root=output_dir,
+            )
+
+            grade_result = grade_profile(
+                profile_path=candidate_profile_path,
+                validation_report_path=simulation_output_dir / "simulation" / "profile_simulation.json",
+                output_dir=grade_output_dir,
+            )
+            self.assertEqual("trial", grade_result["grade_payload"]["suggested_status"])
+            self.assertEqual("promote", grade_result["grade_payload"]["promotion_readiness"])
+
+            promoted_profile = promote_profile(
+                profile_path=candidate_profile_path,
+                grade_report_path=grade_output_dir / "grade" / "profile_grade.json",
+                output_path=promoted_profile_path,
+                profile_name="company-candidate",
+            )
+            self.assertEqual("trial", promoted_profile.profile_status)
+            self.assertEqual("company-candidate", promoted_profile.profile_name)
+            self.assertEqual(1, len(promoted_profile.validation_history))
+            self.assertEqual("improved", promoted_profile.validation_history[0]["assessment_classification"])
+
+    def test_grade_profile_can_promote_trial_to_trusted_after_repeated_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profile_path = root / "trial_profile.json"
+            validation_report_path = root / "validation" / "profile_validation.json"
+            grade_output_dir = root / "grade-output"
+            validation_report_path.parent.mkdir(parents=True)
+
+            profile_payload = {
+                "profile_version": 2,
+                "profile_name": "trial-profile",
+                "profile_status": "trial",
+                "reference_target_default_order": ["sub", "main"],
+                "reference_token_patterns": ["{name}"],
+                "external_xml_name_map": {"shared": "shared-query.xml"},
+                "external_xml_scoped_map": {},
+                "ignore_tags": [],
+                "rules": [],
+                "validation_history": [
+                    {
+                        "assessment_classification": "improved",
+                        "suggested_status": "trial",
+                        "promotion_readiness": "promote",
+                    }
+                ],
+            }
+            profile_path.write_text(json.dumps(profile_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            validation_report_path.write_text(
+                json.dumps(
+                    {
+                        "assessment": {
+                            "classification": "improved",
+                            "recommendation": "good",
+                            "hard_regressions": [],
+                            "soft_regressions": [],
+                            "improvements": ["Resolved query count increased."],
+                        },
+                        "delta": {
+                            "resolved_queries_delta": 1,
+                            "failed_queries_delta": -1,
+                            "error_delta": -1,
+                            "warning_delta": 0,
+                        },
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            grade_result = grade_profile(
+                profile_path=profile_path,
+                validation_report_path=validation_report_path,
+                output_dir=grade_output_dir,
+            )
+
+            self.assertEqual("trusted", grade_result["grade_payload"]["suggested_status"])
+            self.assertEqual("promote", grade_result["grade_payload"]["promotion_readiness"])
 
 
 if __name__ == "__main__":
