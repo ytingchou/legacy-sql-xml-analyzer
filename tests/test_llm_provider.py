@@ -6,10 +6,54 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from legacy_sql_xml_analyzer.llm_provider import LlmProviderError, validate_provider_connection
+from legacy_sql_xml_analyzer.llm_provider import (
+    LlmProviderError,
+    build_non_json_error_message,
+    parse_sse_chat_completion,
+    validate_provider_connection,
+)
 
 
 class ProviderValidationTests(unittest.TestCase):
+    def test_parse_sse_chat_completion_reconstructs_message_content(self) -> None:
+        payload = parse_sse_chat_completion(
+            "\n".join(
+                [
+                    'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}',
+                    'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}',
+                    'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"demo-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}',
+                    "data: [DONE]",
+                ]
+            )
+        )
+        self.assertEqual("chatcmpl-stream", payload["id"])
+        self.assertEqual("Hello", payload["choices"][0]["message"]["content"])
+        self.assertEqual("assistant", payload["choices"][0]["message"]["role"])
+        self.assertEqual("stop", payload["choices"][0]["finish_reason"])
+        self.assertTrue(payload["stream_reconstructed"])
+        self.assertEqual(12, payload["usage"]["total_tokens"])
+
+    def test_build_non_json_error_message_mentions_html_gateway(self) -> None:
+        message = build_non_json_error_message(
+            "https://llm.example.test/v1/chat/completions",
+            "<html><title>Sign In</title></html>",
+            "text/html; charset=utf-8",
+            "Expecting value",
+        )
+        self.assertIn("Content-Type: text/html; charset=utf-8", message)
+        self.assertIn("returned HTML", message)
+        self.assertIn("Response preview", message)
+
+    def test_build_non_json_error_message_mentions_sse_stream(self) -> None:
+        message = build_non_json_error_message(
+            "https://llm.example.test/v1/chat/completions",
+            "data: {\"id\":\"evt-1\"}\n\n",
+            "text/event-stream",
+            "Expecting value",
+        )
+        self.assertIn("SSE/streaming", message)
+        self.assertIn("Content-Type: text/event-stream", message)
+
     def test_validate_provider_connection_writes_success_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

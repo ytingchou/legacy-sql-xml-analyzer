@@ -561,6 +561,7 @@ def post_chat_completion(config: OpenAICompatibleConfig, prompt_text: str) -> di
         ],
         "temperature": config.temperature,
         "max_tokens": config.token_limit,
+        "stream": False,
     }
     headers = {
         "Content-Type": "application/json",
@@ -582,6 +583,7 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeo
     try:
         with request.urlopen(req, timeout=timeout_seconds) as resp:
             raw = resp.read().decode("utf-8")
+            content_type = str(resp.headers.get("Content-Type") or "")
     except error.HTTPError as exc:
         error_body = ""
         if exc.fp is not None:
@@ -593,10 +595,13 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeo
         ) from exc
 
     try:
-        payload = json.loads(raw)
+        if content_type.lower().startswith("text/event-stream") or raw.lstrip().startswith("data:"):
+            payload = parse_sse_chat_completion(raw)
+        else:
+            payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise LlmProviderError(
-            f"LLM provider returned non-JSON content from {url}: {exc.msg}."
+            build_non_json_error_message(url, raw, content_type, exc.msg)
         ) from exc
     return payload
 
@@ -645,6 +650,110 @@ def build_http_error_message(url: str, status_code: int, error_body: str) -> str
     return f"LLM provider request failed with HTTP {status_code} at {url}. {hint}\nProvider body: {detail}"
 
 
+def build_non_json_error_message(url: str, raw_body: str, content_type: str, decode_error: str) -> str:
+    preview = raw_body.strip()[:1200] if raw_body else "empty response body"
+    lowered = raw_body.lower()
+    normalized_content_type = content_type or "unknown"
+    if "text/html" in normalized_content_type.lower() or "<html" in lowered or "<!doctype html" in lowered:
+        hint = "The provider or an upstream gateway returned HTML. Check the base URL, auth gateway, proxy, or SSO interstitial."
+    elif normalized_content_type.lower().startswith("text/event-stream") or lowered.startswith("data:") or "\ndata:" in lowered:
+        hint = "The provider looks like it returned SSE/streaming content. Use a non-streaming OpenAI-compatible chat/completions endpoint."
+    else:
+        hint = "The provider returned a vendor-specific plaintext payload or gateway message. Validate the endpoint with `validate-provider` and inspect the response preview."
+    return (
+        f"LLM provider returned non-JSON content from {url}: {decode_error}. "
+        f"Content-Type: {normalized_content_type}. {hint}\n"
+        f"Response preview: {preview}"
+    )
+
+
+def parse_sse_chat_completion(raw_body: str) -> dict[str, Any]:
+    chunks: list[dict[str, Any]] = []
+    for raw_line in raw_body.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        payload = json.loads(data)
+        if isinstance(payload, dict):
+            chunks.append(payload)
+    if not chunks:
+        raise json.JSONDecodeError("No JSON events found in SSE stream.", raw_body, 0)
+
+    content_by_index: dict[int, list[str]] = {}
+    role_by_index: dict[int, str] = {}
+    finish_reason_by_index: dict[int, Any] = {}
+    usage: dict[str, Any] = {}
+    response_id = None
+    created = None
+    model = None
+    for chunk in chunks:
+        if response_id is None:
+            response_id = chunk.get("id")
+        if created is None:
+            created = chunk.get("created")
+        if model is None:
+            model = chunk.get("model")
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        for choice in chunk.get("choices", []) if isinstance(chunk.get("choices"), list) else []:
+            if not isinstance(choice, dict):
+                continue
+            index = int(choice.get("index", 0))
+            delta = choice.get("delta")
+            message = choice.get("message")
+            role = None
+            content_value: Any = None
+            if isinstance(delta, dict):
+                role = delta.get("role")
+                content_value = delta.get("content")
+            elif isinstance(message, dict):
+                role = message.get("role")
+                content_value = message.get("content")
+            if isinstance(role, str) and role:
+                role_by_index[index] = role
+            if isinstance(content_value, str):
+                content_by_index.setdefault(index, []).append(content_value)
+            elif isinstance(content_value, list):
+                text_parts: list[str] = []
+                for item in content_value:
+                    if isinstance(item, str):
+                        text_parts.append(item)
+                    elif isinstance(item, dict) and item.get("type") == "text":
+                        text_parts.append(str(item.get("text", "")))
+                if text_parts:
+                    content_by_index.setdefault(index, []).append("".join(text_parts))
+            finish_reason_by_index[index] = choice.get("finish_reason")
+
+    all_indexes = content_by_index.keys() | role_by_index.keys() | finish_reason_by_index.keys()
+    if not all_indexes:
+        raise json.JSONDecodeError("No usable choices found in SSE stream.", raw_body, 0)
+    max_index = max(all_indexes)
+    choices: list[dict[str, Any]] = []
+    for index in range(max_index + 1):
+        choices.append(
+            {
+                "index": index,
+                "message": {
+                    "role": role_by_index.get(index, "assistant"),
+                    "content": "".join(content_by_index.get(index, [])),
+                },
+                "finish_reason": finish_reason_by_index.get(index),
+            }
+        )
+    return {
+        "id": response_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": choices,
+        "usage": usage,
+        "stream_reconstructed": True,
+    }
+
+
 def build_request_artifact(config: OpenAICompatibleConfig, prompt_text: str) -> dict[str, Any]:
     return {
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -664,6 +773,7 @@ def build_request_artifact(config: OpenAICompatibleConfig, prompt_text: str) -> 
             ],
             "temperature": config.temperature,
             "max_tokens": config.token_limit,
+            "stream": False,
         },
     }
 

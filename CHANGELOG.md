@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.1 - 2026-03-16
+
+- Added explicit `stream: false` to OpenAI-compatible chat/completions requests.
+- Added SSE (`text/event-stream`) fallback reconstruction so providers that still stream chat completions can be consumed as normal completion payloads.
+- Improved non-JSON provider diagnostics with content-type-aware hints and response previews for HTML gateway pages, SSE streams, and vendor-specific plaintext envelopes.
+- Added tests covering SSE reconstruction and stronger non-JSON provider diagnostics.
+
 ## 1.9.0 - 2026-03-16
 
 - Added a shared CLI console/reporting layer with global `--verbose` and `--no-progress` flags across the command surface.
