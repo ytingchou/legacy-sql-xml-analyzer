@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.23.0 - 2026-03-16
+
+- Added `retry-from-doctor`, which turns the latest doctor diagnosis into a retry-ready plan with generated repair handoff packs and adaptive prompt variants.
+- Added handoff lifecycle tracking under `analysis/handoff/*/lifecycle.json` so operators can see when a prompt pack is new, used, repaired, or resolved.
+- Extended `watch-and-review` so it can update handoff lifecycle state and emit adaptive retry artifacts automatically after a rejected response.
+- Added doctor response scoreboards, Java phase-queue summaries, history trends, and latest-review retry targeting for faster operator decisions.
+- Expanded company weak-model prompt profiles with minimal good/bad examples so Qwen3-class models get tighter output guidance.
+- Extended Java starter output with `dto_contract.json`, `quality_gate.json`, and `delivery_summary.json|.md`, plus a more useful Oracle SQL resource assembler.
+- Added `analysis/bundle_explorer.html` and enriched `analysis/operator_console.html` with queue, scoreboard, handoff-state, and retry visibility.
+- Added tests covering doctor retry planning, handoff lifecycle updates, stronger company prompt rendering, and the new starter quality/delivery artifacts.
+
 ## 1.19.0 - 2026-03-16
 
 - Added `doctor-run` so an analysis output can now be diagnosed into provider, loop, failure, and next-command recommendations without manual artifact hunting.

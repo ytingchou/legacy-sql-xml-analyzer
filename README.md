@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.19.0`
+Current local release: `v1.23.0`
 
 Quick start guides:
 
@@ -30,10 +30,11 @@ Useful commands:
 ```bash
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer explain-failure --output ./analysis-output
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer doctor-run --output ./analysis-output
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer retry-from-doctor --output ./analysis-output
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer emit-company-prompt --analysis-root ./analysis-output --cluster reference_target_missing --stage propose
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer export-vscode-cline-pack --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer compile-adaptive-context --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
-PYTHONPATH=src python3 -m legacy_sql_xml_analyzer watch-and-review --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json --response ./phase.response.json
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer watch-and-review --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json --response ./phase.response.json --source-pack ./analysis-output/analysis/handoff/<pack>/pack.json
 ```
 
 New operator-facing artifacts:
@@ -43,8 +44,11 @@ New operator-facing artifacts:
 - `analysis/prompt_lab.html`: web view for prompt/context packs and token budgets
 - `analysis/failure_console.html`: web view for failure explanations and troubleshooting
 - `analysis/operator_console.html`: single-page operator view for loops, doctor guidance, handoff packs, and next commands
+- `analysis/bundle_explorer.html`: Java BFF bundle queue, delivery readiness, and quality gate explorer
 - `analysis/doctor/doctor_report.json`: machine-readable diagnosis for provider, loop, and failure states
+- `analysis/doctor/retry_plan.json`: retry-ready plan with repair packs and adaptive prompt variants
 - `analysis/adaptive_prompts/*`: smaller retry-ready prompt/context variants for weaker models
+- `analysis/handoff/*/lifecycle.json`: lifecycle state for each handoff pack
 
 ## Usage
 
@@ -108,13 +112,17 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/prompt_lab.html`: static prompt lab for context packs, handoff bundles, and token budgets
 - `analysis/failure_console.html`: static failure console for troubleshooting weak-model, bridge, and provider issues
 - `analysis/operator_console.html`: static operator console for loop state, doctor guidance, and recent handoff packs
+- `analysis/bundle_explorer.html`: static Java bundle explorer for phase queue and delivery readiness
 - `analysis/doctor/doctor_report.json`: machine-readable doctor report with recommended commands
 - `analysis/doctor/doctor_report.md`: human-readable doctor report
+- `analysis/doctor/retry_plan.json`: retry-ready plan generated from the latest doctor diagnosis
+- `analysis/doctor/retry_plan.md`: human-readable retry plan
 - `analysis/adaptive_prompts/*.adaptive.json`: multi-budget prompt/context variants for retry cycles
 - `analysis/watch_review/*.json`: automated watch-and-review results with repair-pack references
 - `analysis/failure_explanations/index.json`: aggregated actionable failure explanations
 - `analysis/failure_explanations/*.md`: per-failure troubleshooting cards with recommended commands and company-LLM prompts
 - `analysis/handoff/*/pack.json`: Cline / VS Code handoff pack metadata
+- `analysis/handoff/*/lifecycle.json`: handoff lifecycle state and history
 - `analysis/handoff/*/prompt.txt`: copy-ready prompt for company weak models
 - `analysis/failure_clusters.json`: grouped diagnostic families for repeated issues
 - `analysis/failure_clusters.md`: human-readable failure family summary
@@ -376,8 +384,11 @@ The Java BFF loop adds:
 - `analysis/java_bff/skeletons/*/manifest.json`: emitted Java file manifest
 - `analysis/java_bff/skeletons/*/README.md`: handoff readme for the generated skeleton bundle
 - `analysis/java_bff/skeletons/*/starter_project/manifest.json`: starter Spring Boot project manifest
+- `analysis/java_bff/skeletons/*/starter_project/dto_contract.json`: inferred request fields and accepted response hints
 - `analysis/java_bff/skeletons/*/starter_project/verification_checklist.json`: implementation verification checklist
 - `analysis/java_bff/skeletons/*/starter_project/merge_guard.json`: merge guard summary before accepting generated starter code
+- `analysis/java_bff/skeletons/*/starter_project/quality_gate.json`: delivery blockers and warnings
+- `analysis/java_bff/skeletons/*/starter_project/delivery_summary.json`: shortest summary of remaining human work
 - `analysis/java_bff/reviews/*/*-normalization.json`: normalization reports for Java BFF phase responses after repairing weak-model output
 - `analysis/java_bff/loop/loop_state.json`: resumable loop state
 - `analysis/java_bff/loop/completion_report.json`: final status with missing artifact tracking

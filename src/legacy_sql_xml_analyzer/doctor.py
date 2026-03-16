@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .failure_explainer import explain_failure_from_output_dir
+from .context_compiler import estimate_tokens
 from .prompting import resolve_analysis_root
 
 
@@ -18,6 +19,11 @@ def doctor_run(output_dir: Path) -> dict[str, Any]:
     generic_completion = load_json(analysis_root / "agent_loop" / "completion_report.json")
     java_completion = load_json(analysis_root / "java_bff" / "loop" / "completion_report.json")
     provider_rows = load_provider_rows(analysis_root / "provider_validation")
+    response_scoreboard = build_response_scoreboard(analysis_root)
+    history_trend = build_history_trend(analysis_root)
+    handoff_lifecycle = summarize_handoff_lifecycle(analysis_root)
+    phase_queue = build_phase_queue_summary(analysis_root)
+    latest_review_candidate = find_latest_review_candidate(analysis_root)
     doctor_payload = {
         "generated_at": timestamp_now(),
         "analysis_root": str(analysis_root.resolve()),
@@ -27,6 +33,11 @@ def doctor_run(output_dir: Path) -> dict[str, Any]:
         "provider_validations": provider_rows,
         "failure_summary": summarize_failures(failure_payload["index"]),
         "recommended_actions": build_recommended_actions(generic_completion, java_completion, provider_rows, failure_payload["index"]),
+        "response_scoreboard": response_scoreboard,
+        "history_trend": history_trend,
+        "handoff_lifecycle": handoff_lifecycle,
+        "phase_queue": phase_queue,
+        "latest_review_candidate": latest_review_candidate,
         "artifacts": build_artifact_list(analysis_root, failure_payload),
     }
     root = analysis_root / "doctor"
@@ -38,6 +49,80 @@ def doctor_run(output_dir: Path) -> dict[str, Any]:
     doctor_payload["json_path"] = str(json_path.resolve())
     doctor_payload["md_path"] = str(md_path.resolve())
     return doctor_payload
+
+
+def retry_from_doctor(output_dir: Path) -> dict[str, Any]:
+    from .adaptive_prompt import (
+        compile_adaptive_generic_context,
+        compile_adaptive_java_context,
+        plan_prompt_downgrade,
+        write_adaptive_payload,
+    )
+    from .handoff import export_vscode_cline_pack
+
+    doctor_payload = doctor_run(output_dir)
+    analysis_root = Path(str(doctor_payload["analysis_root"])).resolve()
+    latest_review = doctor_payload.get("latest_review_candidate")
+    plan = {
+        "generated_at": timestamp_now(),
+        "analysis_root": str(analysis_root),
+        "doctor_status": doctor_payload.get("status"),
+        "recommended_actions": doctor_payload.get("recommended_actions", []),
+        "latest_review_candidate": latest_review,
+        "generated_artifacts": [],
+        "commands": [],
+        "notes": [],
+    }
+    for item in doctor_payload.get("recommended_actions", [])[:3]:
+        if isinstance(item, dict) and item.get("command"):
+            plan["commands"].append(str(item["command"]))
+
+    if isinstance(latest_review, dict) and latest_review.get("review_path"):
+        review_path = Path(str(latest_review["review_path"]))
+        handoff = export_vscode_cline_pack(
+            analysis_root,
+            review_path=review_path,
+            profile_name="company-qwen3-verify" if latest_review.get("kind") == "generic" else "company-qwen3-java-phase",
+            initial_state="repaired",
+        )
+        plan["generated_artifacts"].extend(handoff.get("written_paths", []))
+        plan["notes"].append(f"Generated repair handoff pack for {review_path.name}.")
+
+        current_tokens = estimate_retry_prompt_tokens(review_path)
+        targets = plan_prompt_downgrade(current_tokens, max_candidates=3)
+        adaptive_paths: list[str] = []
+        if latest_review.get("kind") == "generic" and latest_review.get("cluster_id") and latest_review.get("stage"):
+            payload = compile_adaptive_generic_context(
+                analysis_root=analysis_root,
+                cluster_id=str(latest_review["cluster_id"]),
+                phase=str(latest_review["stage"]),
+                prompt_profile="qwen3-128k-autonomous",
+                targets=targets["candidate_targets"] or None,
+            )
+            adaptive_paths = [str(path.resolve()) for path in write_adaptive_payload(analysis_root, payload)]
+        elif latest_review.get("kind") == "java-bff" and latest_review.get("phase_pack_path"):
+            payload = compile_adaptive_java_context(
+                analysis_root=analysis_root,
+                prompt_json=Path(str(latest_review["phase_pack_path"])),
+                prompt_profile="qwen3-128k-java-bff",
+                targets=targets["candidate_targets"] or None,
+            )
+            adaptive_paths = [str(path.resolve()) for path in write_adaptive_payload(analysis_root, payload)]
+        if adaptive_paths:
+            plan["generated_artifacts"].extend(adaptive_paths)
+            plan["notes"].append(
+                f"Generated adaptive retry variants for targets={','.join(str(item) for item in targets['candidate_targets'])}."
+            )
+
+    root = analysis_root / "doctor"
+    root.mkdir(parents=True, exist_ok=True)
+    json_path = root / "retry_plan.json"
+    md_path = root / "retry_plan.md"
+    json_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    md_path.write_text(render_retry_plan_markdown(plan), encoding="utf-8")
+    plan["json_path"] = str(json_path.resolve())
+    plan["md_path"] = str(md_path.resolve())
+    return plan
 
 
 def load_json(path: Path) -> dict[str, Any] | None:
@@ -60,6 +145,22 @@ def load_provider_rows(root: Path) -> list[dict[str, Any]]:
             payload["summary_path"] = str(summary_path.resolve())
             rows.append(payload)
     return rows[-5:]
+
+
+def load_review_rows(root: Path, *, kind: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if kind == "generic":
+        paths = sorted(root.glob("llm_reviews/*-review.json"))
+    else:
+        paths = sorted((root / "java_bff" / "reviews").glob("*/*-review.json"))
+    for path in paths:
+        payload = load_json(path)
+        if payload:
+            payload["review_path"] = str(path.resolve())
+            payload["kind"] = kind
+            payload["mtime"] = path.stat().st_mtime
+            rows.append(payload)
+    return rows
 
 
 def summarize_loop(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -87,6 +188,144 @@ def summarize_failures(index_payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "count": len(explanations),
         "top_codes": [{"failure_code": code, "count": count} for code, count in top_codes],
+    }
+
+
+def build_response_scoreboard(analysis_root: Path) -> dict[str, Any]:
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    for payload in load_review_rows(analysis_root, kind="generic") + load_review_rows(analysis_root, kind="java-bff"):
+        stage = str(payload.get("stage") or payload.get("phase") or "unknown")
+        kind = str(payload.get("kind") or "unknown")
+        key = (kind, stage)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "kind": kind,
+                "stage": stage,
+                "review_count": 0,
+                "accepted": 0,
+                "needs_revision": 0,
+                "insufficient_evidence": 0,
+            },
+        )
+        bucket["review_count"] += 1
+        status = str(payload.get("status") or "unknown")
+        if status in bucket:
+            bucket[status] += 1
+    rows = []
+    for bucket in sorted(buckets.values(), key=lambda item: (item["kind"], item["stage"])):
+        count = max(int(bucket["review_count"]), 1)
+        rows.append(
+            {
+                **bucket,
+                "acceptance_rate": round((int(bucket["accepted"]) / count) * 100, 1),
+                "revision_rate": round((int(bucket["needs_revision"]) / count) * 100, 1),
+            }
+        )
+    return {"rows": rows, "total_reviews": sum(int(item["review_count"]) for item in rows)}
+
+
+def build_history_trend(analysis_root: Path) -> dict[str, Any]:
+    generic_history = load_json_list(analysis_root / "agent_loop" / "phase_history.json")
+    java_history = load_json_list(analysis_root / "java_bff" / "loop" / "phase_history.json")
+    handoff_lifecycle = summarize_handoff_lifecycle(analysis_root)
+    return {
+        "generic_event_count": len(generic_history),
+        "java_event_count": len(java_history),
+        "latest_generic_event": generic_history[-1] if generic_history else None,
+        "latest_java_event": java_history[-1] if java_history else None,
+        "handoff_state_counts": handoff_lifecycle.get("state_counts", {}),
+    }
+
+
+def summarize_handoff_lifecycle(analysis_root: Path) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    state_counts: dict[str, int] = {}
+    for path in sorted((analysis_root / "handoff").glob("*/lifecycle.json")):
+        payload = load_json(path)
+        if not payload:
+            continue
+        state = str(payload.get("state") or "unknown")
+        state_counts[state] = state_counts.get(state, 0) + 1
+        rows.append(
+            {
+                "title": payload.get("title") or path.parent.name,
+                "state": state,
+                "lifecycle_path": str(path.resolve()),
+                "history_length": len(payload.get("history", [])) if isinstance(payload.get("history"), list) else 0,
+            }
+        )
+    return {
+        "count": len(rows),
+        "state_counts": state_counts,
+        "rows": rows[-20:],
+    }
+
+
+def build_phase_queue_summary(analysis_root: Path) -> dict[str, Any]:
+    from .java_bff import safe_name
+
+    java_root = analysis_root / "java_bff"
+    rows: list[dict[str, Any]] = []
+    bundles_root = java_root / "bundles"
+    if not bundles_root.exists():
+        return {"bundle_count": 0, "pending_bundle_count": 0, "rows": rows}
+    for bundle_path in sorted(bundles_root.glob("*/bundle.json")):
+        payload = load_json(bundle_path)
+        if not payload:
+            continue
+        bundle_id = str(payload.get("bundle_id") or bundle_path.parent.name)
+        slug = safe_name(bundle_id)
+        sequence = payload.get("recommended_sequence", [])
+        completed_phases = 0
+        pending_phases = 0
+        latest_status = "pending"
+        next_prompt = None
+        for prompt in sequence if isinstance(sequence, list) else []:
+            prompt_json = Path(str(prompt)).with_suffix(".json")
+            review_json = java_root / "reviews" / slug / f"{safe_name(prompt_json.stem)}-review.json"
+            review = load_json(review_json)
+            if review and str(review.get("status")) in {"accepted", "insufficient_evidence"}:
+                completed_phases += 1
+                latest_status = str(review.get("status"))
+                continue
+            pending_phases += 1
+            if next_prompt is None:
+                next_prompt = str(prompt_json.resolve())
+                latest_status = str(review.get("status") or "pending") if review else "pending"
+        rows.append(
+            {
+                "bundle_id": bundle_id,
+                "completed_phases": completed_phases,
+                "pending_phases": pending_phases,
+                "latest_status": latest_status,
+                "next_prompt": next_prompt,
+            }
+        )
+    return {
+        "bundle_count": len(rows),
+        "pending_bundle_count": sum(1 for item in rows if int(item["pending_phases"]) > 0),
+        "rows": rows,
+    }
+
+
+def find_latest_review_candidate(analysis_root: Path) -> dict[str, Any] | None:
+    rows = [
+        item
+        for item in load_review_rows(analysis_root, kind="generic") + load_review_rows(analysis_root, kind="java-bff")
+        if str(item.get("status") or "") == "needs_revision"
+    ]
+    if not rows:
+        return None
+    latest = max(rows, key=lambda item: float(item.get("mtime", 0)))
+    return {
+        "kind": latest.get("kind"),
+        "review_path": latest.get("review_path"),
+        "cluster_id": latest.get("cluster_id"),
+        "stage": latest.get("stage"),
+        "phase": latest.get("phase"),
+        "phase_pack_path": latest.get("phase_pack_path"),
+        "status": latest.get("status"),
     }
 
 
@@ -174,6 +413,33 @@ def build_artifact_list(analysis_root: Path, failure_payload: dict[str, Any]) ->
     return [str(Path(item).resolve()) for item in artifacts if item and Path(str(item)).exists()]
 
 
+def estimate_retry_prompt_tokens(review_path: Path) -> int | None:
+    payload = load_json(review_path)
+    if not payload:
+        return None
+    for key in ("repair_prompt_text", "next_prompt_text"):
+        text = payload.get(key)
+        if isinstance(text, str) and text.strip():
+            return estimate_tokens(text)
+    for key in ("repair_prompt_path", "next_prompt_path"):
+        prompt_path = payload.get(key)
+        if prompt_path and Path(str(prompt_path)).exists():
+            return estimate_tokens(Path(str(prompt_path)).read_text(encoding="utf-8"))
+    return None
+
+
+def load_json_list(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
 def render_doctor_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Doctor Report",
@@ -205,6 +471,51 @@ def render_doctor_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- `{item['failure_code']}` x{item['count']}")
     else:
         lines.append("- None")
+    lines.extend(["", "## Review Scoreboard"])
+    for item in payload.get("response_scoreboard", {}).get("rows", [])[:10]:
+        lines.append(
+            f"- `{item['kind']}:{item['stage']}` reviews={item['review_count']} "
+            f"accepted={item['accepted']} needs_revision={item['needs_revision']}"
+        )
+    if payload.get("latest_review_candidate"):
+        latest = payload["latest_review_candidate"]
+        lines.extend(
+            [
+                "",
+                "## Latest Retry Candidate",
+                f"- Kind: `{latest.get('kind') or 'unknown'}`",
+                f"- Review: `{latest.get('review_path') or 'n/a'}`",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_retry_plan_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Doctor Retry Plan",
+        "",
+        f"- Doctor status: `{payload.get('doctor_status')}`",
+        f"- Analysis root: `{payload.get('analysis_root')}`",
+        "",
+        "## Commands",
+    ]
+    commands = payload.get("commands", [])
+    if commands:
+        for item in commands:
+            lines.append(f"- `{item}`")
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Generated Artifacts"])
+    artifacts = payload.get("generated_artifacts", [])
+    if artifacts:
+        for item in artifacts:
+            lines.append(f"- `{item}`")
+    else:
+        lines.append("- None")
+    if payload.get("notes"):
+        lines.extend(["", "## Notes"])
+        for item in payload["notes"]:
+            lines.append(f"- {item}")
     return "\n".join(lines).rstrip() + "\n"
 
 

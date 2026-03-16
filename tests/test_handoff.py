@@ -54,9 +54,12 @@ class HandoffPackTests(unittest.TestCase):
             self.assertEqual("generic_cluster", payload["kind"])
             self.assertTrue(payload["written_paths"])
             pack_path = next(Path(item) for item in payload["written_paths"] if item.endswith("pack.json"))
+            lifecycle_path = next(Path(item) for item in payload["written_paths"] if item.endswith("lifecycle.json"))
             pack = load_json(pack_path)
+            lifecycle = load_json(lifecycle_path)
             self.assertEqual("company-qwen3-propose", pack["profile_name"])
             self.assertIn("Return JSON only", pack["prompt_text"])
+            self.assertEqual("new", lifecycle["state"])
 
     def test_export_review_repair_pack(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

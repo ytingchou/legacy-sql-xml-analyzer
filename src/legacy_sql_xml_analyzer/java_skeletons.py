@@ -454,8 +454,11 @@ def render_bundle_readme(payload: dict[str, Any], merged: dict[str, Any]) -> str
                 "",
                 "## Starter Project",
                 f"- Manifest: `{starter.get('manifest_path', 'n/a')}`",
+                f"- DTO contract: `{starter.get('dto_contract_path', 'n/a')}`",
                 f"- Verification checklist: `{starter.get('verification_checklist_path', 'n/a')}`",
                 f"- Merge guard: `{starter.get('merge_guard_path', 'n/a')}`",
+                f"- Quality gate: `{starter.get('quality_gate_path', 'n/a')}`",
+                f"- Delivery summary: `{starter.get('delivery_summary_path', 'n/a')}`",
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
@@ -480,13 +483,35 @@ def write_starter_project(
     pom_path = starter_root / "pom.xml"
     app_path = resources_root / "application.yml"
     sql_path = sql_root / f"{class_base}.sql"
+    dto_contract_json = starter_root / "dto_contract.json"
     checklist_json = starter_root / "verification_checklist.json"
     checklist_md = starter_root / "verification_checklist.md"
     merge_guard_json = starter_root / "merge_guard.json"
+    quality_gate_json = starter_root / "quality_gate.json"
+    delivery_summary_json = starter_root / "delivery_summary.json"
+    delivery_summary_md = starter_root / "delivery_summary.md"
     manifest_json = starter_root / "manifest.json"
 
+    dto_contract_payload = build_dto_contract(bundle, merged, base_package, class_base)
     checklist_payload = build_verification_checklist(bundle, merged, base_package, class_base, sql_path)
     merge_guard_payload = build_merge_guard(bundle, merged, checklist_payload)
+    quality_gate_payload = build_starter_quality_gate(
+        bundle=bundle,
+        merged=merged,
+        dto_contract=dto_contract_payload,
+        merge_guard=merge_guard_payload,
+        checklist=checklist_payload,
+        sql_resource_text=render_sql_resource(bundle, merged),
+    )
+    delivery_summary_payload = build_delivery_summary(
+        bundle=bundle,
+        base_package=base_package,
+        class_base=class_base,
+        dto_contract=dto_contract_payload,
+        checklist=checklist_payload,
+        merge_guard=merge_guard_payload,
+        quality_gate=quality_gate_payload,
+    )
     manifest_payload = {
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "bundle_id": bundle["bundle_id"],
@@ -495,18 +520,27 @@ def write_starter_project(
         "pom_path": str(pom_path.resolve()),
         "application_yml_path": str(app_path.resolve()),
         "sql_resource_path": str(sql_path.resolve()),
+        "dto_contract_path": str(dto_contract_json.resolve()),
         "verification_checklist_path": str(checklist_json.resolve()),
         "merge_guard_path": str(merge_guard_json.resolve()),
+        "quality_gate_path": str(quality_gate_json.resolve()),
+        "delivery_summary_path": str(delivery_summary_json.resolve()),
+        "delivery_summary_markdown_path": str(delivery_summary_md.resolve()),
         "ready_for_compile": not merge_guard_payload["blocking_issues"],
+        "ready_for_delivery": bool(quality_gate_payload.get("ready_for_delivery")),
         "verification_item_count": len(checklist_payload["items"]),
     }
 
     pom_path.write_text(render_pom_xml(base_package), encoding="utf-8")
     app_path.write_text(render_application_yml(class_base), encoding="utf-8")
-    sql_path.write_text(render_sql_resource(bundle, merged), encoding="utf-8")
+    sql_path.write_text(quality_gate_payload["sql_resource_text"], encoding="utf-8")
+    dto_contract_json.write_text(json.dumps(dto_contract_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     checklist_json.write_text(json.dumps(checklist_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     checklist_md.write_text(render_verification_checklist_markdown(checklist_payload), encoding="utf-8")
     merge_guard_json.write_text(json.dumps(merge_guard_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    quality_gate_json.write_text(json.dumps(quality_gate_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    delivery_summary_json.write_text(json.dumps(delivery_summary_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    delivery_summary_md.write_text(render_delivery_summary_markdown(delivery_summary_payload), encoding="utf-8")
     manifest_json.write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return {
@@ -515,9 +549,13 @@ def write_starter_project(
             artifact_descriptor_for_path(pom_path, "code", f"Java starter pom.xml: {bundle['bundle_id']}", "java_bff"),
             artifact_descriptor_for_path(app_path, "code", f"Java starter application.yml: {bundle['bundle_id']}", "java_bff"),
             artifact_descriptor_for_path(sql_path, "code", f"Java starter SQL resource: {bundle['bundle_id']}", "java_bff"),
+            artifact_descriptor_for_path(dto_contract_json, "json", f"Java starter DTO contract: {bundle['bundle_id']}", "java_bff"),
             artifact_descriptor_for_path(checklist_json, "json", f"Java starter verification checklist: {bundle['bundle_id']}", "java_bff"),
             artifact_descriptor_for_path(checklist_md, "markdown", f"Java starter verification checklist summary: {bundle['bundle_id']}", "java_bff"),
             artifact_descriptor_for_path(merge_guard_json, "json", f"Java starter merge guard: {bundle['bundle_id']}", "java_bff"),
+            artifact_descriptor_for_path(quality_gate_json, "json", f"Java starter quality gate: {bundle['bundle_id']}", "java_bff"),
+            artifact_descriptor_for_path(delivery_summary_json, "json", f"Java starter delivery summary: {bundle['bundle_id']}", "java_bff"),
+            artifact_descriptor_for_path(delivery_summary_md, "markdown", f"Java starter delivery summary (Markdown): {bundle['bundle_id']}", "java_bff"),
             artifact_descriptor_for_path(manifest_json, "json", f"Java starter manifest: {bundle['bundle_id']}", "java_bff"),
         ],
     }
@@ -635,6 +673,92 @@ def build_merge_guard(bundle: dict[str, Any], merged: dict[str, Any], checklist:
     }
 
 
+def build_dto_contract(bundle: dict[str, Any], merged: dict[str, Any], base_package: str, class_base: str) -> dict[str, Any]:
+    entry_query = next((item for item in bundle.get("queries", []) if item.get("query_id") == bundle.get("entry_query_id")), None)
+    parameters = entry_query.get("parameters", []) if isinstance(entry_query, dict) else []
+    request_fields = normalize_parameter_specs(parameters)
+    if not request_fields:
+        request_fields = [{"parameter_name": "keyword", "field_name": "keyword", "java_type": "String"}]
+    dto_hints = merged.get("bff_plan", {}).get("dto_contract_hints", []) if isinstance(merged.get("bff_plan"), dict) else []
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "bundle_id": bundle["bundle_id"],
+        "request_class": f"{base_package}.dto.{class_base}Request",
+        "response_class": f"{base_package}.dto.{class_base}Response",
+        "request_fields": request_fields,
+        "response_contract_hints": dto_hints if isinstance(dto_hints, list) else [],
+        "notes": [
+            "Request fields were inferred from legacy SQL XML parameters.",
+            "Response hints come from accepted Java BFF phase outputs and still require engineering review.",
+        ],
+    }
+
+
+def build_starter_quality_gate(
+    *,
+    bundle: dict[str, Any],
+    merged: dict[str, Any],
+    dto_contract: dict[str, Any],
+    merge_guard: dict[str, Any],
+    checklist: dict[str, Any],
+    sql_resource_text: str,
+) -> dict[str, Any]:
+    blocking_issues = list(merge_guard.get("blocking_issues", [])) if isinstance(merge_guard.get("blocking_issues"), list) else []
+    warnings = list(merge_guard.get("warnings", [])) if isinstance(merge_guard.get("warnings"), list) else []
+    todo_count = sql_resource_text.count("TODO")
+    if "/* TODO: paste the final Oracle 19c SQL here */" in sql_resource_text:
+        warnings.append("SQL resource still contains the placeholder body and needs final engineer confirmation.")
+    if todo_count:
+        warnings.append(f"Starter artifacts still contain {todo_count} TODO marker(s).")
+    if not dto_contract.get("request_fields"):
+        blocking_issues.append("DTO contract has no inferred request fields.")
+    if not dto_contract.get("response_contract_hints"):
+        warnings.append("DTO contract has no response hints; response DTO remains generic.")
+    if checklist.get("guess_risks"):
+        blocking_issues.extend(f"guess_risk: {item}" for item in checklist.get("guess_risks", []))
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "bundle_id": bundle["bundle_id"],
+        "blocking_issues": list(dict.fromkeys(blocking_issues)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "todo_count": todo_count,
+        "response_hint_count": len(dto_contract.get("response_contract_hints", [])),
+        "ready_for_delivery": not blocking_issues,
+        "sql_resource_text": sql_resource_text,
+    }
+
+
+def build_delivery_summary(
+    *,
+    bundle: dict[str, Any],
+    base_package: str,
+    class_base: str,
+    dto_contract: dict[str, Any],
+    checklist: dict[str, Any],
+    merge_guard: dict[str, Any],
+    quality_gate: dict[str, Any],
+) -> dict[str, Any]:
+    next_steps: list[str] = []
+    if quality_gate.get("blocking_issues"):
+        next_steps.extend(str(item) for item in quality_gate["blocking_issues"][:5])
+    else:
+        next_steps.append("Replace remaining TODO comments and run compile/test in the target Spring Boot repo.")
+    if quality_gate.get("warnings"):
+        next_steps.extend(str(item) for item in quality_gate["warnings"][:3])
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "bundle_id": bundle["bundle_id"],
+        "base_package": base_package,
+        "entry_class_base": class_base,
+        "ready_for_compile": bool(merge_guard.get("ready_for_compile")),
+        "ready_for_delivery": bool(quality_gate.get("ready_for_delivery")),
+        "request_field_count": len(dto_contract.get("request_fields", [])),
+        "response_hint_count": len(dto_contract.get("response_contract_hints", [])),
+        "verification_item_count": len(checklist.get("items", [])),
+        "next_steps": next_steps,
+    }
+
+
 def render_pom_xml(base_package: str) -> str:
     return f"""<project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -693,21 +817,34 @@ app:
 def render_sql_resource(bundle: dict[str, Any], merged: dict[str, Any]) -> str:
     repository_queries = merged.get("repository_plan", {}).get("queries", []) if isinstance(merged.get("repository_plan"), dict) else []
     lines = [
-        "-- Replace this file with the preserved Oracle 19c SQL generated from the legacy XML analysis.",
+        "-- Generated from legacy SQL XML analysis for Oracle 19c.",
         f"-- Bundle: {bundle['bundle_id']}",
-        "-- The placeholder below intentionally stays empty until an engineer pastes the final SQL.",
+        "-- Review this file carefully before production use.",
         "",
     ]
+    query_lookup = {
+        str(item.get("query_id") or ""): item
+        for item in bundle.get("queries", [])
+        if isinstance(item, dict)
+    }
     for item in repository_queries:
         if not isinstance(item, dict):
             continue
-        lines.append(f"-- query_id: {item.get('query_id')}")
+        query_id = str(item.get("query_id") or "")
+        lines.append(f"-- query_id: {query_id}")
         merge_output = item.get("merge_output")
         if isinstance(merge_output, dict):
             for logic in merge_output.get("repository_logic", [])[:4]:
                 lines.append(f"-- logic: {logic}")
+        query_payload = query_lookup.get(query_id, {})
+        sql_text = str(query_payload.get("resolved_sql") or query_payload.get("raw_sql") or "").strip()
+        if sql_text:
+            lines.append(sql_text)
+        else:
+            lines.append("/* TODO: paste the final Oracle 19c SQL here */")
         lines.append("")
-    lines.append("/* TODO: paste the final Oracle 19c SQL here */")
+    if not repository_queries:
+        lines.append("/* TODO: paste the final Oracle 19c SQL here */")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -731,6 +868,24 @@ def render_verification_checklist_markdown(payload: dict[str, Any]) -> str:
         lines.extend(["", "## Final Recommendations"])
         for item in payload["final_recommendations"]:
             lines.append(f"- {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_delivery_summary_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Delivery Summary",
+        "",
+        f"- Bundle: `{payload['bundle_id']}`",
+        f"- Base package: `{payload['base_package']}`",
+        f"- Ready for compile: `{payload['ready_for_compile']}`",
+        f"- Ready for delivery: `{payload['ready_for_delivery']}`",
+        f"- Request field count: `{payload['request_field_count']}`",
+        f"- Response hint count: `{payload['response_hint_count']}`",
+        "",
+        "## Next Steps",
+    ]
+    for item in payload.get("next_steps", []):
+        lines.append(f"- {item}")
     return "\n".join(lines).rstrip() + "\n"
 
 

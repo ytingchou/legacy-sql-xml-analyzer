@@ -12,6 +12,20 @@ The key rule is simple:
 - do not feed the whole `analysis/java_bff/` folder to the model
 - always feed one bundle, one phase, or one chunk at a time
 
+When the flow stalls, do not guess the next command. Use:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer doctor-run --output "$OUT_DIR"
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer retry-from-doctor --output "$OUT_DIR"
+```
+
+This gives you:
+
+- `analysis/doctor/doctor_report.json`
+- `analysis/doctor/retry_plan.json`
+- `analysis/handoff/*`
+- `analysis/adaptive_prompts/*`
+
 ## 1. Pick the Right Workflow
 
 There are two practical workflows:
@@ -108,6 +122,8 @@ Start here:
 - `analysis/java_bff/merged/*/implementation_plan.json`
 - `analysis/java_bff/skeletons/*/manifest.json`
 - `analysis/java_bff/skeletons/*/README.md`
+- `analysis/java_bff/skeletons/*/starter_project/quality_gate.json`
+- `analysis/java_bff/skeletons/*/starter_project/delivery_summary.json`
 - `analysis/java_bff/loop/completion_report.json`
 
 These are the highest-value outputs:
@@ -115,6 +131,8 @@ These are the highest-value outputs:
 - `implementation_plan.json`: repository, service, controller, DTO, and SQL logic plan
 - `manifest.json`: generated Java skeleton inventory
 - `README.md`: handoff notes for implementation
+- `quality_gate.json`: delivery blockers and warnings
+- `delivery_summary.json`: shortest summary of remaining human work
 - `completion_report.json`: tells you whether the loop really finished
 
 ## 4. Fastest Path: Generic Parser/Profile Repair + Cline CLI

@@ -455,15 +455,21 @@ def refresh_completion_state(analysis_root: Path, state: dict[str, Any]) -> None
                 manifest_json = java_root / "skeletons" / slug / "manifest.json"
                 readme_md = java_root / "skeletons" / slug / "README.md"
                 starter_manifest = java_root / "skeletons" / slug / "starter_project" / "manifest.json"
+                starter_dto_contract = java_root / "skeletons" / slug / "starter_project" / "dto_contract.json"
                 starter_checklist = java_root / "skeletons" / slug / "starter_project" / "verification_checklist.json"
                 starter_guard = java_root / "skeletons" / slug / "starter_project" / "merge_guard.json"
+                starter_quality = java_root / "skeletons" / slug / "starter_project" / "quality_gate.json"
+                starter_delivery = java_root / "skeletons" / slug / "starter_project" / "delivery_summary.json"
                 required.extend(
                     [
                         str(manifest_json.resolve()),
                         str(readme_md.resolve()),
                         str(starter_manifest.resolve()),
+                        str(starter_dto_contract.resolve()),
                         str(starter_checklist.resolve()),
                         str(starter_guard.resolve()),
+                        str(starter_quality.resolve()),
+                        str(starter_delivery.resolve()),
                     ]
                 )
                 if manifest_json.exists():
@@ -472,10 +478,16 @@ def refresh_completion_state(analysis_root: Path, state: dict[str, Any]) -> None
                     completed.append(str(readme_md.resolve()))
                 if starter_manifest.exists():
                     completed.append(str(starter_manifest.resolve()))
+                if starter_dto_contract.exists():
+                    completed.append(str(starter_dto_contract.resolve()))
                 if starter_checklist.exists():
                     completed.append(str(starter_checklist.resolve()))
                 if starter_guard.exists():
                     completed.append(str(starter_guard.resolve()))
+                if starter_quality.exists():
+                    completed.append(str(starter_quality.resolve()))
+                if starter_delivery.exists():
+                    completed.append(str(starter_delivery.resolve()))
 
     unique_required = list(dict.fromkeys(required))
     unique_completed = list(dict.fromkeys(path for path in completed if path in set(unique_required)))

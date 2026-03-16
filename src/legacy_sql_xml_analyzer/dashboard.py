@@ -21,6 +21,10 @@ CASE_PATTERN = re.compile(r"\bcase\b", re.IGNORECASE)
 PREDICATE_PATTERN = re.compile(r"\b(?:and|or)\b", re.IGNORECASE)
 
 
+def safe_name(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "._-" else "_" for char in value)
+
+
 def write_executive_report(
     output_dir: Path,
     result: AnalysisResult,
@@ -434,6 +438,7 @@ def write_evolution_report(
     prompt_lab_path = analysis_root / "prompt_lab.html"
     failure_console_path = analysis_root / "failure_console.html"
     operator_console_path = analysis_root / "operator_console.html"
+    bundle_explorer_path = analysis_root / "bundle_explorer.html"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_evolution_summary_markdown(summary), encoding="utf-8")
     scoreboard_json_path.write_text(
@@ -476,6 +481,10 @@ def write_evolution_report(
         ),
         encoding="utf-8",
     )
+    bundle_explorer_path.write_text(
+        render_bundle_explorer_html(build_bundle_explorer_summary(output_dir)),
+        encoding="utf-8",
+    )
     return [
         artifact_descriptor_for_path(json_path, "json", "Evolution summary", "prompting"),
         artifact_descriptor_for_path(md_path, "markdown", "Evolution summary (Markdown)", "prompting"),
@@ -485,6 +494,7 @@ def write_evolution_report(
         artifact_descriptor_for_path(prompt_lab_path, "html", "Prompt lab", "prompting"),
         artifact_descriptor_for_path(failure_console_path, "html", "Failure console", "prompting"),
         artifact_descriptor_for_path(operator_console_path, "html", "Operator console", "prompting"),
+        artifact_descriptor_for_path(bundle_explorer_path, "html", "Java bundle explorer", "prompting"),
     ]
 
 
@@ -706,6 +716,11 @@ def build_operator_console_summary(
         "java_pack_count": prompt_lab_summary.get("java_pack_count", 0),
         "handoff_pack_count": prompt_lab_summary.get("handoff_pack_count", 0),
         "handoff_rows": handoff_rows,
+        "handoff_state_counts": doctor_payload.get("handoff_lifecycle", {}).get("state_counts", {}),
+        "phase_queue": doctor_payload.get("phase_queue", {}),
+        "response_scoreboard": doctor_payload.get("response_scoreboard", {}).get("rows", []),
+        "history_trend": doctor_payload.get("history_trend", {}),
+        "latest_review_candidate": doctor_payload.get("latest_review_candidate"),
     }
 
 
@@ -720,8 +735,23 @@ def render_operator_console_html(summary: dict[str, Any]) -> str:
         f"<td>{escape_html(str(item['path']))}</td></tr>"
         for item in summary.get("handoff_rows", [])
     )
+    queue_rows = "".join(
+        f"<tr><td>{escape_html(str(item['bundle_id']))}</td><td>{item['completed_phases']}</td>"
+        f"<td>{item['pending_phases']}</td><td>{escape_html(str(item['latest_status']))}</td>"
+        f"<td>{escape_html(str(item.get('next_prompt') or 'n/a'))}</td></tr>"
+        for item in summary.get("phase_queue", {}).get("rows", [])[:12]
+    )
+    response_rows = "".join(
+        f"<tr><td>{escape_html(str(item['kind']))}</td><td>{escape_html(str(item['stage']))}</td>"
+        f"<td>{item['review_count']}</td><td>{item['accepted']}</td>"
+        f"<td>{item['needs_revision']}</td><td>{item['acceptance_rate']}%</td></tr>"
+        for item in summary.get("response_scoreboard", [])[:12]
+    )
     generic_loop = summary.get("generic_loop", {})
     java_loop = summary.get("java_loop", {})
+    latest_review = summary.get("latest_review_candidate") or {}
+    handoff_states = summary.get("handoff_state_counts", {})
+    history_trend = summary.get("history_trend", {})
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -752,11 +782,119 @@ def render_operator_console_html(summary: dict[str, Any]) -> str:
     <div class="card"><strong>{summary['handoff_pack_count']}</strong><div>Handoff Packs</div></div>
     <div class="card"><strong>{len(summary.get('recommended_actions', []))}</strong><div>Recommended Actions</div></div>
   </div>
+  <div class="grid">
+    <div class="card"><strong>{handoff_states.get('new', 0)}</strong><div>New Handoffs</div></div>
+    <div class="card"><strong>{handoff_states.get('used', 0)}</strong><div>Used Handoffs</div></div>
+    <div class="card"><strong>{handoff_states.get('repaired', 0)}</strong><div>Repair Handoffs</div></div>
+    <div class="card"><strong>{handoff_states.get('resolved', 0)}</strong><div>Resolved Handoffs</div></div>
+  </div>
+  <div class="grid">
+    <div class="card"><strong>{history_trend.get('generic_event_count', 0)}</strong><div>Generic History Events</div></div>
+    <div class="card"><strong>{history_trend.get('java_event_count', 0)}</strong><div>Java History Events</div></div>
+    <div class="card"><strong>{summary.get('phase_queue', {}).get('bundle_count', 0)}</strong><div>Java Bundles</div></div>
+    <div class="card"><strong>{summary.get('phase_queue', {}).get('pending_bundle_count', 0)}</strong><div>Pending Bundles</div></div>
+  </div>
   <h2>Recommended Actions</h2>
   <table><thead><tr><th>Category</th><th>Summary</th><th>Command</th></tr></thead><tbody>{action_rows or '<tr><td colspan="3">No actions</td></tr>'}</tbody></table>
+  <h2>Latest Retry Candidate</h2>
+  <div class="card">
+    <div><strong>Kind:</strong> {escape_html(str(latest_review.get('kind') or 'n/a'))}</div>
+    <div><strong>Review:</strong> {escape_html(str(latest_review.get('review_path') or 'n/a'))}</div>
+    <div><strong>Stage/Phase:</strong> {escape_html(str(latest_review.get('stage') or latest_review.get('phase') or 'n/a'))}</div>
+  </div>
+  <h2>Phase Queue</h2>
+  <table><thead><tr><th>Bundle</th><th>Completed</th><th>Pending</th><th>Status</th><th>Next Prompt</th></tr></thead><tbody>{queue_rows or '<tr><td colspan="5">No Java bundle queue yet</td></tr>'}</tbody></table>
+  <h2>Response Scoreboard</h2>
+  <table><thead><tr><th>Kind</th><th>Stage/Phase</th><th>Reviews</th><th>Accepted</th><th>Needs Revision</th><th>Acceptance</th></tr></thead><tbody>{response_rows or '<tr><td colspan="6">No review data yet</td></tr>'}</tbody></table>
   <h2>Recent Handoff Packs</h2>
   <table><thead><tr><th>Title</th><th>Profile</th><th>Path</th></tr></thead><tbody>{handoff_rows or '<tr><td colspan="3">No handoff packs</td></tr>'}</tbody></table>
-  <div><a href="dashboard.html">Dashboard</a> · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a> · <a href="evolution_console.html">Evolution Console</a></div>
+  <div><a href="dashboard.html">Dashboard</a> · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a> · <a href="bundle_explorer.html">Bundle Explorer</a> · <a href="evolution_console.html">Evolution Console</a></div>
+</body>
+</html>
+"""
+
+
+def build_bundle_explorer_summary(output_dir: Path) -> dict[str, Any]:
+    analysis_root = output_dir / "analysis"
+    java_root = analysis_root / "java_bff"
+    rows: list[dict[str, Any]] = []
+    for bundle_path in sorted((java_root / "bundles").glob("*/bundle.json")):
+        payload = load_json_payload(bundle_path)
+        if not payload:
+            continue
+        bundle_id = str(payload.get("bundle_id") or bundle_path.parent.name)
+        slug = bundle_path.parent.name
+        merged_path = java_root / "merged" / slug / "implementation_plan.json"
+        starter_root = java_root / "skeletons" / slug / "starter_project"
+        quality_gate = load_json_payload(starter_root / "quality_gate.json")
+        delivery_summary = load_json_payload(starter_root / "delivery_summary.json")
+        phase_rows = []
+        for prompt in payload.get("recommended_sequence", []) if isinstance(payload.get("recommended_sequence"), list) else []:
+            prompt_json = Path(str(prompt)).with_suffix(".json")
+            review_json = java_root / "reviews" / slug / f"{safe_name(prompt_json.stem)}-review.json"
+            review = load_json_payload(review_json)
+            phase_rows.append(
+                {
+                    "phase": prompt_json.stem,
+                    "status": review.get("status") if isinstance(review, dict) else "pending",
+                    "review_path": str(review_json.resolve()) if review_json.exists() else "",
+                }
+            )
+        rows.append(
+            {
+                "bundle_id": bundle_id,
+                "merged_ready": bool((load_json_payload(merged_path) or {}).get("completion", {}).get("ready_for_skeletons")),
+                "delivery_ready": bool((quality_gate or {}).get("ready_for_delivery")),
+                "quality_blockers": len((quality_gate or {}).get("blocking_issues", [])) if isinstance(quality_gate, dict) else 0,
+                "next_steps": (delivery_summary or {}).get("next_steps", [])[:3] if isinstance(delivery_summary, dict) else [],
+                "phase_rows": phase_rows,
+                "starter_root": str(starter_root.resolve()),
+                "quality_gate_path": str((starter_root / "quality_gate.json").resolve()) if (starter_root / "quality_gate.json").exists() else "",
+            }
+        )
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "bundle_count": len(rows),
+        "rows": rows,
+    }
+
+
+def render_bundle_explorer_html(summary: dict[str, Any]) -> str:
+    rows = []
+    for item in summary.get("rows", []):
+        phase_summary = "<br>".join(
+            f"{escape_html(str(phase['phase']))}: {escape_html(str(phase['status']))}" for phase in item.get("phase_rows", [])
+        )
+        next_steps = "<br>".join(escape_html(str(step)) for step in item.get("next_steps", []))
+        rows.append(
+            f"<tr><td>{escape_html(str(item['bundle_id']))}</td>"
+            f"<td>{escape_html(str(item['merged_ready']))}</td>"
+            f"<td>{escape_html(str(item['delivery_ready']))}</td>"
+            f"<td>{item['quality_blockers']}</td>"
+            f"<td>{phase_summary or 'n/a'}</td>"
+            f"<td>{next_steps or 'n/a'}</td>"
+            f"<td>{escape_html(str(item.get('quality_gate_path') or 'n/a'))}</td></tr>"
+        )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Bundle Explorer</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; color: #12212e; background: #f6f7f8; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; }}
+    th, td {{ border-bottom: 1px solid #e6eaee; text-align: left; padding: 10px; vertical-align: top; }}
+    th {{ background: #eef3f6; }}
+  </style>
+</head>
+<body>
+  <h1>Bundle Explorer</h1>
+  <p>Java BFF bundle progress, quality gate status, and next delivery steps.</p>
+  <table>
+    <thead><tr><th>Bundle</th><th>Merged Ready</th><th>Delivery Ready</th><th>Blockers</th><th>Phase Status</th><th>Next Steps</th><th>Quality Gate</th></tr></thead>
+    <tbody>{''.join(rows) or '<tr><td colspan=\"7\">No Java bundles available</td></tr>'}</tbody>
+  </table>
+  <div style="margin-top:20px;"><a href="operator_console.html">Operator Console</a> · <a href="dashboard.html">Dashboard</a> · <a href="failure_console.html">Failure Console</a></div>
 </body>
 </html>
 """

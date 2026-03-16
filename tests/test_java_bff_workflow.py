@@ -141,8 +141,13 @@ order by o.order_id desc
             self.assertIn("fetchOrderSearch", repo_text)
             starter_root = output_dir / "analysis" / "java_bff" / "skeletons" / safe_name(bundle_id) / "starter_project"
             self.assertTrue((starter_root / "pom.xml").exists())
+            self.assertTrue((starter_root / "dto_contract.json").exists())
             self.assertTrue((starter_root / "verification_checklist.json").exists())
             self.assertTrue((starter_root / "merge_guard.json").exists())
+            self.assertTrue((starter_root / "quality_gate.json").exists())
+            self.assertTrue((starter_root / "delivery_summary.json").exists())
+            quality_gate = load_json(starter_root / "quality_gate.json")
+            self.assertTrue(quality_gate["ready_for_delivery"])
 
             review_root = output_dir / "analysis" / "java_bff" / "reviews" / safe_name(bundle_id)
             self.assertTrue(any(review_root.glob("*-review.json")))

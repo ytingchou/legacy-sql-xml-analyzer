@@ -21,6 +21,7 @@ def export_vscode_cline_pack(
     review_path: Path | None = None,
     output_dir: Path | None = None,
     profile_name: str = "company-qwen3-java-phase",
+    initial_state: str = "new",
 ) -> dict[str, Any]:
     analysis_root = resolve_analysis_root(analysis_root)
     if review_path is not None:
@@ -31,7 +32,7 @@ def export_vscode_cline_pack(
         payload = build_pack_from_generic_context(analysis_root, cluster_id=cluster_id, stage=stage, profile_name=profile_name)
     else:
         raise ValueError("Provide either --review, --prompt-json, or --cluster together with --stage.")
-    written = write_handoff_pack(output_dir or analysis_root.parent, payload)
+    written = write_handoff_pack(output_dir or analysis_root.parent, payload, initial_state=initial_state)
     payload["written_paths"] = [str(path.resolve()) for path in written]
     return payload
 
@@ -161,7 +162,7 @@ def build_pack_from_review(
     }
 
 
-def write_handoff_pack(output_root: Path, payload: dict[str, Any]) -> list[Path]:
+def write_handoff_pack(output_root: Path, payload: dict[str, Any], *, initial_state: str = "new") -> list[Path]:
     analysis_root = resolve_analysis_root(output_root)
     handoff_root = analysis_root / "handoff" / safe_name(str(payload.get("title") or "pack"))
     handoff_root.mkdir(parents=True, exist_ok=True)
@@ -177,8 +178,78 @@ def write_handoff_pack(output_root: Path, payload: dict[str, Any]) -> list[Path]
     notes_path.write_text(render_operator_notes(payload), encoding="utf-8")
     readme_path.write_text(build_handoff_readme(payload), encoding="utf-8")
     meta_path = handoff_root / "pack.json"
+    lifecycle_path = handoff_root / "lifecycle.json"
+    lifecycle_payload = {
+        "generated_at": timestamp_now(),
+        "title": payload.get("title"),
+        "kind": payload.get("kind"),
+        "state": initial_state,
+        "history": [
+            {
+                "generated_at": timestamp_now(),
+                "event": "created",
+                "state": initial_state,
+                "notes": [f"Created from kind={payload.get('kind') or 'unknown'}."],
+            }
+        ],
+    }
+    payload = dict(payload)
+    payload["pack_json_path"] = str(meta_path.resolve())
+    payload["pack_root"] = str(handoff_root.resolve())
+    payload["lifecycle_path"] = str(lifecycle_path.resolve())
     meta_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return [prompt_path, schema_path, template_path, notes_path, readme_path, meta_path]
+    lifecycle_path.write_text(json.dumps(lifecycle_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return [prompt_path, schema_path, template_path, notes_path, readme_path, meta_path, lifecycle_path]
+
+
+def load_handoff_pack(pack_path: Path) -> dict[str, Any]:
+    payload = json.loads(pack_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected handoff pack JSON object at {pack_path}")
+    return payload
+
+
+def update_handoff_lifecycle(
+    pack_path: Path,
+    *,
+    state: str,
+    event: str,
+    notes: list[str] | None = None,
+    related_artifacts: list[str] | None = None,
+) -> dict[str, Any]:
+    payload = load_handoff_pack(pack_path)
+    lifecycle_path = Path(str(payload.get("lifecycle_path") or pack_path.parent / "lifecycle.json"))
+    if lifecycle_path.exists():
+        lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+        if not isinstance(lifecycle, dict):
+            lifecycle = {}
+    else:
+        lifecycle = {}
+    history = lifecycle.get("history")
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "generated_at": timestamp_now(),
+            "event": event,
+            "state": state,
+            "notes": notes or [],
+            "related_artifacts": related_artifacts or [],
+        }
+    )
+    lifecycle.update(
+        {
+            "generated_at": lifecycle.get("generated_at") or timestamp_now(),
+            "title": payload.get("title"),
+            "kind": payload.get("kind"),
+            "state": state,
+            "history": history,
+        }
+    )
+    lifecycle_path.write_text(json.dumps(lifecycle, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload["lifecycle_path"] = str(lifecycle_path.resolve())
+    Path(pack_path).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return lifecycle
 
 
 def render_operator_notes(payload: dict[str, Any]) -> str:
@@ -201,6 +272,7 @@ def build_handoff_readme(payload: dict[str, Any]) -> str:
         "- `schema.json`: expected response schema",
         "- `response_template.json`: minimal JSON shape",
         "- `operator_notes.md`: how to use the pack",
+        "- `lifecycle.json`: pack lifecycle state for operators and watch-and-review",
         "",
         "## Source Artifacts",
     ]

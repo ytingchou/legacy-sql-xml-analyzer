@@ -30,6 +30,8 @@ class CompanyPromptProfilesTests(unittest.TestCase):
         self.assertIn("Forbidden actions:", prompt)
         self.assertIn("Return JSON only", prompt)
         self.assertIn('"cluster_id": "string"', prompt)
+        self.assertIn("Good output example:", prompt)
+        self.assertIn("Bad output example:", prompt)
 
 
 if __name__ == "__main__":

@@ -121,9 +121,11 @@ order by o.order_id desc
             completion_path = output_dir / "analysis" / "java_bff" / "loop" / "completion_report.json"
             skeleton_readme = output_dir / "analysis" / "java_bff" / "skeletons" / safe_name(bundle_id) / "README.md"
             starter_manifest = output_dir / "analysis" / "java_bff" / "skeletons" / safe_name(bundle_id) / "starter_project" / "manifest.json"
+            quality_gate = output_dir / "analysis" / "java_bff" / "skeletons" / safe_name(bundle_id) / "starter_project" / "quality_gate.json"
             self.assertTrue(completion_path.exists())
             self.assertTrue(skeleton_readme.exists())
             self.assertTrue(starter_manifest.exists())
+            self.assertTrue(quality_gate.exists())
 
 
 if __name__ == "__main__":

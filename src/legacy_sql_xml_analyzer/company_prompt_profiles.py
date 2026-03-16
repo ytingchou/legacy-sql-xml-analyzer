@@ -18,6 +18,12 @@ COMPANY_PROMPT_PROFILES: dict[str, dict[str, Any]] = {
             "do not propose XML edits",
             "do not return prose outside JSON",
         ],
+        "good_output_examples": [
+            '{"cluster_id":"example","problem_type":"mapping_inference","missing_evidence":["external xml alias"],"confidence":"medium","insufficient_evidence":true}'
+        ],
+        "bad_output_examples": [
+            "The issue is probably a typo. You should fix the XML and try again."
+        ],
     },
     "company-qwen3-propose": {
         "max_input_tokens": 18000,
@@ -30,6 +36,12 @@ COMPANY_PROMPT_PROFILES: dict[str, dict[str, Any]] = {
             "do not invent new tables, columns, or business filters",
             "do not widen the blast radius without evidence",
             "do not return prose outside JSON",
+        ],
+        "good_output_examples": [
+            '{"cluster_id":"example","problem_type":"mapping_inference","proposed_change_type":"profile_rule","proposed_rule_or_fix":{"rule_type":"external_xml_name_mapping"},"confidence":"medium","why":["repeated alias pattern"],"verification_steps":["simulate profile"],"risks":[],"insufficient_evidence":false}'
+        ],
+        "bad_output_examples": [
+            "I think you should rewrite the SQL and merge two queries into one."
         ],
     },
     "company-qwen3-verify": {
@@ -45,6 +57,12 @@ COMPANY_PROMPT_PROFILES: dict[str, dict[str, Any]] = {
             "do not rewrite SQL business logic",
             "do not return prose outside JSON",
         ],
+        "good_output_examples": [
+            '{"cluster_id":"example","verdict":"needs_review","constraint_checks":["schema ok"],"blocking_risks":["missing evidence"],"recommended_next_step":"repair"}'
+        ],
+        "bad_output_examples": [
+            "Looks good overall, but maybe add another rule."
+        ],
     },
     "company-qwen3-java-phase": {
         "max_input_tokens": 22000,
@@ -58,6 +76,12 @@ COMPANY_PROMPT_PROFILES: dict[str, dict[str, Any]] = {
             "do not merge multiple phases into one answer",
             "do not guess missing SQL logic",
             "do not return prose outside JSON",
+        ],
+        "good_output_examples": [
+            '{"entry_query_id":"orders.xml:main:OrderSearch","service_logic":["validate request","call repository"],"controller_logic":["delegate to service"],"dto_contract_hints":["customerId required"],"error_handling":["translate sql exceptions"],"follow_up_questions":[]}'
+        ],
+        "bad_output_examples": [
+            "Here is a full Spring Boot implementation with guessed SQL."
         ],
     },
 }
@@ -111,6 +135,14 @@ def render_company_prompt(
     if extra_constraints:
         lines.extend(["", "Additional constraints:"])
         lines.extend(f"- {line}" for line in extra_constraints)
+    good_examples = profile.get("good_output_examples")
+    if isinstance(good_examples, list) and good_examples:
+        lines.extend(["", "Good output example:"])
+        lines.extend(good_examples[:1])
+    bad_examples = profile.get("bad_output_examples")
+    if isinstance(bad_examples, list) and bad_examples:
+        lines.extend(["", "Bad output example:"])
+        lines.extend(bad_examples[:1])
     lines.extend(["", "Evidence:"])
     for header, body in evidence_sections:
         lines.extend([f"## {header}", body.rstrip(), ""])

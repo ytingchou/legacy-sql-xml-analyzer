@@ -18,6 +18,7 @@ from .cline_bridge import COMMAND_PROFILES
 from .console import ConsoleReporter
 from .context_compiler import compile_context_pack_from_analysis, write_context_pack
 from .doctor import doctor_run
+from .doctor import retry_from_doctor
 from .evolution import (
     apply_profile_patch_bundle,
     propose_rules_from_analysis,
@@ -335,6 +336,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis artifacts.")
 
+    retry_doctor_parser = subparsers.add_parser(
+        "retry-from-doctor",
+        help="Generate retry-ready repair packs and adaptive prompt variants from the latest doctor report and failed review.",
+    )
+    retry_doctor_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis artifacts.")
+
     watch_review_parser = subparsers.add_parser(
         "watch-and-review",
         help="Watch for a response file, review it automatically, and optionally emit a repair handoff pack.",
@@ -344,6 +351,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_review_parser.add_argument("--cluster", help="Generic cluster_id.")
     watch_review_parser.add_argument("--stage", choices=["classify", "propose", "verify"], help="Generic stage when --cluster is used.")
     watch_review_parser.add_argument("--prompt-json", type=Path, help="Java BFF phase prompt JSON path.")
+    watch_review_parser.add_argument("--source-pack", type=Path, help="Optional handoff pack.json path so lifecycle state can be updated.")
     watch_review_parser.add_argument("--timeout-seconds", type=float, default=300.0, help="Maximum time to wait for the response file.")
     watch_review_parser.add_argument("--poll-seconds", type=float, default=2.0, help="Polling interval while waiting for the response file.")
     watch_review_parser.add_argument("--no-repair-pack", action="store_true", help="Do not emit a repair handoff pack when review fails.")
@@ -560,6 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
             repair_company_prompt_parser,
             export_handoff_parser,
             doctor_parser,
+            retry_doctor_parser,
             watch_review_parser,
             adaptive_context_parser,
             shrink_prompt_parser,
@@ -655,6 +664,15 @@ def build_command_artifact_hints(args: argparse.Namespace) -> list[str]:
                 str(output / "analysis" / "failure_explanations" / "index.md"),
             ]
         )
+    if command == "retry-from-doctor" and getattr(args, "output", None):
+        output = args.output.resolve()
+        hints.extend(
+            [
+                str(output / "analysis" / "doctor" / "retry_plan.json"),
+                str(output / "analysis" / "handoff"),
+                str(output / "analysis" / "adaptive_prompts"),
+            ]
+        )
     if command == "watch-and-review" and getattr(args, "analysis_root", None):
         analysis_root = resolve_analysis_root(args.analysis_root.resolve())
         hints.extend(
@@ -692,6 +710,8 @@ def build_error_hints(args: argparse.Namespace, exc: Exception) -> list[str]:
         hints.append("Use `inspect-java-bff-loop` after a stopped run to inspect the latest prompt, review, and missing artifacts.")
     if command == "watch-and-review":
         hints.append("If review fails, inspect the generated repair pack under analysis/handoff and retry the same phase with a smaller context.")
+    if command == "retry-from-doctor":
+        hints.append("Open analysis/doctor/retry_plan.json and use the generated repair handoff pack or adaptive prompt artifacts for the next retry.")
     if not hints:
         hints.append("Inspect the command-specific output artifacts and rerun with `--verbose` for the traceback.")
     return hints
@@ -1019,6 +1039,14 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
         )
         return 0
 
+    if args.command == "retry-from-doctor":
+        emit_command_start(reporter, "retry-from-doctor", output=args.output.resolve())
+        payload = retry_from_doctor(args.output.resolve())
+        reporter.success(
+            f"Generated retry plan with {len(payload['generated_artifacts'])} artifact(s) at {payload['json_path']}."
+        )
+        return 0
+
     if args.command == "watch-and-review":
         emit_command_start(reporter, "watch-and-review", response=args.response.resolve())
         if args.cluster and not args.stage:
@@ -1029,6 +1057,7 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
             cluster_id=args.cluster,
             stage=args.stage,
             prompt_json=args.prompt_json.resolve() if args.prompt_json else None,
+            source_pack_path=args.source_pack.resolve() if args.source_pack else None,
             timeout_seconds=args.timeout_seconds,
             poll_seconds=args.poll_seconds,
             emit_repair_pack=not args.no_repair_pack,

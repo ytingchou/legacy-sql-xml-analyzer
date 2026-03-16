@@ -120,12 +120,38 @@ def shrink_prompt_text(prompt_text: str, target_tokens: int) -> dict[str, Any]:
     }
 
 
+def plan_prompt_downgrade(
+    current_tokens: int | None,
+    *,
+    targets: list[int] | None = None,
+    max_candidates: int = 3,
+) -> dict[str, Any]:
+    ordered_targets = sorted({int(item) for item in (targets or DEFAULT_TARGETS) if int(item) > 0}, reverse=True)
+    if not ordered_targets:
+        ordered_targets = sorted(DEFAULT_TARGETS, reverse=True)
+    baseline = int(current_tokens or 0)
+    recommended: list[int] = []
+    if baseline > 0:
+        recommended = [target for target in ordered_targets if target < baseline]
+    if not recommended:
+        recommended = list(reversed(sorted(ordered_targets)))[:max_candidates]
+    recommended = recommended[:max_candidates]
+    return {
+        "current_tokens": baseline,
+        "candidate_targets": recommended,
+        "recommended_target": recommended[0] if recommended else None,
+    }
+
+
 def write_adaptive_payload(output_root: Path, payload: dict[str, Any]) -> list[Path]:
     analysis_root = resolve_output_analysis_root(output_root)
     root = analysis_root / "adaptive_prompts"
     root.mkdir(parents=True, exist_ok=True)
     if payload["kind"] == "generic_adaptive_context":
         base = f"{safe_name(payload['cluster_id'])}-{safe_name(payload['phase'])}"
+    elif payload["kind"] == "shrunk_prompt":
+        source_pack = Path(str(payload.get("source_pack") or "shrunk-prompt"))
+        base = safe_name(source_pack.stem)
     else:
         base = safe_name(Path(str(payload["prompt_json"])).stem)
     json_path = root / f"{base}.adaptive.json"
