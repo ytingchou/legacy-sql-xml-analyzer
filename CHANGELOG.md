@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.0 - 2026-03-16
+
+- Added a reusable `tools/cline_bridge.py` wrapper plus `src/legacy_sql_xml_analyzer/cline_bridge.py` so generic analyzer loops and Java BFF loops can hand off phase tasks to the installed Cline CLI through a stable file-based contract.
+- Added built-in Cline execution profiles (`cline-json`, `cline-json-yolo`, `cline-text`, `cline-text-yolo`) so the bridge can invoke Cline without hand-written shell templates.
+- Added automatic parsing of Cline `--json` event-line output so bridge results now capture the final assistant response instead of raw progress logs.
+- Added top-level CLI flags such as `--cline-bridge-profile`, `--cline-cwd`, `--cline-model`, and related `--cline-*` options on run/resume loop commands so users can generate the bridge command automatically without manually composing `--cline-bridge-command`.
+- Expanded README guidance for the fast Qwen3/Cline workflow and added tests covering bridge execution, Cline JSON extraction, and auto-generated loop bridge commands.
+
 ## 1.9.1 - 2026-03-16
 
 - Added explicit `stream: false` to OpenAI-compatible chat/completions requests.

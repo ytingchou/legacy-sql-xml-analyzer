@@ -215,6 +215,58 @@ The built-in `qwen3-128k-*` prompt profiles are intentionally conservative:
 - `insufficient_evidence` is treated as a valid weak-model answer
 - output headroom is reserved so 128k-token models do not run out of completion budget
 
+If you want Cline CLI to act as the executor instead of calling the provider directly, use the file-based bridge contract:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer run-agent-loop \
+  --input ./xml \
+  --output ./analysis-output \
+  --runner-mode cline_bridge \
+  --cline-bridge-profile cline-json \
+  --cline-cwd /path/to/your/workspace
+```
+
+The main CLI will generate the underlying `tools/cline_bridge.py` command for you. If you still want full manual control, `--cline-bridge-command` remains available.
+
+The generic loop writes:
+
+- `analysis/agent_tasks/*.json`: pending tasks for Cline
+- `analysis/agent_runs/*.result.json`: result contract that the bridge must write back
+
+`tools/cline_bridge.py` supports three execution styles:
+
+- `--command-profile`: built-in profiles for the installed `cline` CLI. Start with `cline-json`, or use `cline-json-yolo` if you explicitly want `--yolo`
+- `--stdin-command`: send the compiled prompt to the external command over stdin and capture stdout
+- `--command-template`: run a shell template with placeholders like `{prompt_file}`, `{response_file}`, and `{task_file}`
+
+The built-in profiles understand the current Cline CLI shape and avoid hand-writing shell commands every time:
+
+- `cline-json`
+- `cline-json-yolo`
+- `cline-text`
+- `cline-text-yolo`
+
+You can also tune the built-in profile with:
+
+- `--cline-command`: alternate executable, for example `npx cline` or a wrapper script
+- `--cline-cwd`: workspace passed to `cline task --cwd`
+- `--cline-model`
+- `--cline-config`
+- `--cline-extra-args`
+- `--cline-timeout`
+- `--cline-verbose-output`
+- `--cline-double-check-completion`
+
+The same `--cline-*` knobs are also available directly on `run-agent-loop`, `resume-agent-loop`, `run-java-bff-loop`, and `resume-java-bff-loop` whenever you use `--runner-mode cline_bridge --cline-bridge-profile ...`.
+
+When you use `cline-json` or `cline-json-yolo`, the bridge parses Cline's JSON event lines and extracts the final assistant response automatically before writing `*.result.json`.
+
+For generic tasks the bridge materializes:
+
+- `<analysis>/agent_runs/<task_id>.prompt.txt`
+- `<analysis>/agent_runs/<task_id>.response.txt`
+- `<analysis>/agent_runs/<task_id>.result.json`
+
 Prepare a Java Spring Boot BFF artifact pack for weak models such as Qwen3, with Oracle 19c SQL logic split into token-safe chunks:
 
 ```bash
@@ -278,6 +330,40 @@ The Java BFF loop adds:
 - `analysis/java_bff/skeletons/*/README.md`: handoff readme for the generated skeleton bundle
 - `analysis/java_bff/loop/loop_state.json`: resumable loop state
 - `analysis/java_bff/loop/completion_report.json`: final status with missing artifact tracking
+
+The same bridge pattern works for Java BFF:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer run-java-bff-loop \
+  --input ./xml \
+  --output ./analysis-output \
+  --runner-mode cline_bridge \
+  --cline-bridge-profile cline-json \
+  --cline-cwd /path/to/your/workspace \
+  --package-name com.example.legacybff
+```
+
+The Java BFF bridge reads:
+
+- `analysis/java_bff/tasks/*/*.json`
+
+and writes:
+
+- `analysis/java_bff/agent_runs/*/*.result.json`
+
+Each Java task already includes:
+
+- `context_prompt_path`
+- `context_pack_path`
+- `expected_schema`
+- `recommended_result_path`
+
+So your bridge only needs to:
+
+1. read the prompt from `context_prompt_path`
+2. call Cline
+3. write the raw response text
+4. write the result JSON to `recommended_result_path`
 
 The Java BFF weak-model workflow now applies stronger reviewer guardrails before a phase is accepted:
 

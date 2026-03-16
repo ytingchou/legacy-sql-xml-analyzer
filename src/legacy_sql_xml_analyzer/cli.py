@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import shlex
+import sys
 from pathlib import Path
 
 from .agent_loop import inspect_agent_loop, resume_agent_loop, run_agent_loop
 from .analyzer import analyze_directory
+from .cline_bridge import COMMAND_PROFILES
 from .console import ConsoleReporter
 from .context_compiler import compile_context_pack_from_analysis, write_context_pack
 from .evolution import (
@@ -35,6 +38,85 @@ from .prompting import prepare_prompt_pack_from_analysis
 from .schemas import LoopConfig
 from .validation import validate_profile
 from .web import serve_report
+
+
+def add_cline_bridge_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge after writing each task file.")
+    parser.add_argument(
+        "--cline-bridge-profile",
+        choices=sorted(COMMAND_PROFILES),
+        help="Generate a local tools/cline_bridge.py command automatically from a built-in Cline command profile.",
+    )
+    parser.add_argument("--cline-command", default="cline", help="Base Cline command used by --cline-bridge-profile.")
+    parser.add_argument("--cline-cwd", type=Path, help="Workspace path passed to generated Cline bridge commands via --cline-cwd.")
+    parser.add_argument("--cline-model", help="Optional model name passed to generated Cline bridge commands.")
+    parser.add_argument("--cline-config", type=Path, help="Optional config directory passed to generated Cline bridge commands.")
+    parser.add_argument("--cline-extra-args", help="Extra arguments appended to the generated Cline bridge command.")
+    parser.add_argument("--cline-timeout", type=int, help="Optional --timeout passed through to generated Cline bridge commands.")
+    parser.add_argument("--cline-verbose-output", action="store_true", help="Pass --cline-verbose-output to generated Cline bridge commands.")
+    parser.add_argument(
+        "--cline-double-check-completion",
+        action="store_true",
+        help="Pass --cline-double-check-completion to generated Cline bridge commands.",
+    )
+
+
+def resolve_cline_bridge_command(args: argparse.Namespace, *, output_dir: Path, mode: str, runner_mode: str) -> str | None:
+    profile_specific_values = {
+        "cline_cwd": args.cline_cwd,
+        "cline_model": args.cline_model,
+        "cline_config": args.cline_config,
+        "cline_extra_args": args.cline_extra_args,
+        "cline_timeout": args.cline_timeout,
+        "cline_verbose_output": args.cline_verbose_output,
+        "cline_double_check_completion": args.cline_double_check_completion,
+    }
+    has_profile_specific = any(
+        value not in (None, False, "")
+        for value in profile_specific_values.values()
+    )
+    if args.cline_bridge_command and (args.cline_bridge_profile or has_profile_specific):
+        raise ValueError("Use either --cline-bridge-command or --cline-bridge-profile/--cline-* options, not both.")
+    if args.cline_bridge_command:
+        return args.cline_bridge_command
+    if args.cline_bridge_profile is None:
+        if has_profile_specific:
+            raise ValueError("--cline-* bridge options require --cline-bridge-profile.")
+        return None
+    if runner_mode != "cline_bridge":
+        raise ValueError("--cline-bridge-profile can only be used when --runner-mode=cline_bridge.")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bridge_script = repo_root / "tools" / "cline_bridge.py"
+    bridge_root = output_dir.resolve() / "analysis"
+    if mode == "java-bff":
+        bridge_root = bridge_root / "java_bff"
+
+    command: list[str] = [
+        sys.executable,
+        str(bridge_script),
+        mode,
+        str(bridge_root),
+        "--command-profile",
+        args.cline_bridge_profile,
+        "--cline-command",
+        args.cline_command,
+    ]
+    if args.cline_cwd:
+        command.extend(["--cline-cwd", str(args.cline_cwd.resolve())])
+    if args.cline_model:
+        command.extend(["--cline-model", args.cline_model])
+    if args.cline_config:
+        command.extend(["--cline-config", str(args.cline_config.resolve())])
+    if args.cline_extra_args:
+        command.extend(["--cline-extra-args", args.cline_extra_args])
+    if args.cline_timeout is not None:
+        command.extend(["--cline-timeout", str(args.cline_timeout)])
+    if args.cline_verbose_output:
+        command.append("--cline-verbose-output")
+    if args.cline_double_check_completion:
+        command.append("--cline-double-check-completion")
+    return " ".join(shlex.quote(part) for part in command)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -225,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override for provider mode.")
     loop_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
     loop_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
-    loop_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge after writing each task file.")
+    add_cline_bridge_arguments(loop_parser)
 
     resume_parser = subparsers.add_parser(
         "resume-agent-loop",
@@ -241,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override.")
     resume_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
     resume_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
-    resume_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge after writing each task file.")
+    add_cline_bridge_arguments(resume_parser)
 
     inspect_parser = subparsers.add_parser(
         "inspect-agent-loop",
@@ -330,7 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     java_loop_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override.")
     java_loop_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
     java_loop_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
-    java_loop_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge after writing each task file.")
+    add_cline_bridge_arguments(java_loop_parser)
     java_loop_parser.add_argument("--package-name", default="com.example.legacybff", help="Java package name for generated skeleton files.")
     java_loop_parser.add_argument("--entry-file", help="Optional XML filename to focus the Java BFF pack.")
     java_loop_parser.add_argument("--entry-main-query", help="Optional main-query name to focus the Java BFF pack.")
@@ -350,7 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume_java_loop_parser.add_argument("--token-limit", type=int, help="Optional completion token limit override.")
     resume_java_loop_parser.add_argument("--temperature", type=float, help="Optional provider temperature override.")
     resume_java_loop_parser.add_argument("--timeout-seconds", type=float, help="Optional provider timeout override.")
-    resume_java_loop_parser.add_argument("--cline-bridge-command", help="Optional shell command to trigger the Cline bridge.")
+    add_cline_bridge_arguments(resume_java_loop_parser)
     resume_java_loop_parser.add_argument("--package-name", help="Optional package name override.")
 
     inspect_java_loop_parser = subparsers.add_parser(
@@ -769,6 +851,12 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
 
     if args.command == "run-agent-loop":
         emit_command_start(reporter, "run-agent-loop", input=args.input.resolve(), output=args.output.resolve())
+        cline_bridge_command = resolve_cline_bridge_command(
+            args,
+            output_dir=args.output.resolve(),
+            mode="generic",
+            runner_mode=args.runner_mode,
+        )
         config = LoopConfig(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -786,7 +874,7 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
             token_limit=args.token_limit,
             temperature=args.temperature,
             timeout_seconds=args.timeout_seconds,
-            cline_bridge_command=args.cline_bridge_command,
+            cline_bridge_command=cline_bridge_command,
         )
         payload = run_agent_loop(config, reporter=reporter)
         return summarize_loop_result(
@@ -798,11 +886,19 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
 
     if args.command == "resume-agent-loop":
         emit_command_start(reporter, "resume-agent-loop", output=args.output.resolve())
+        inspection = inspect_agent_loop(args.output.resolve())
+        persisted_runner_mode = str(inspection["state"]["config"].get("runner_mode") or "provider")
+        cline_bridge_command = resolve_cline_bridge_command(
+            args,
+            output_dir=args.output.resolve(),
+            mode="generic",
+            runner_mode=persisted_runner_mode,
+        )
         payload = resume_agent_loop(
             output_dir=args.output.resolve(),
             config=LoopConfig.from_dict(
                 {
-                    **inspect_agent_loop(args.output.resolve())["state"]["config"],
+                    **inspection["state"]["config"],
                     **{
                         key: value
                         for key, value in {
@@ -815,7 +911,7 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
                             "token_limit": args.token_limit,
                             "temperature": args.temperature,
                             "timeout_seconds": args.timeout_seconds,
-                            "cline_bridge_command": args.cline_bridge_command,
+                            "cline_bridge_command": cline_bridge_command,
                         }.items()
                         if value is not None
                     },
@@ -937,6 +1033,12 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
 
     if args.command == "run-java-bff-loop":
         emit_command_start(reporter, "run-java-bff-loop", input=args.input.resolve(), output=args.output.resolve())
+        cline_bridge_command = resolve_cline_bridge_command(
+            args,
+            output_dir=args.output.resolve(),
+            mode="java-bff",
+            runner_mode=args.runner_mode,
+        )
         config = JavaBffLoopConfig(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -954,7 +1056,7 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
             token_limit=args.token_limit,
             temperature=args.temperature,
             timeout_seconds=args.timeout_seconds,
-            cline_bridge_command=args.cline_bridge_command,
+            cline_bridge_command=cline_bridge_command,
             package_name=args.package_name,
             entry_file=args.entry_file,
             entry_main_query=args.entry_main_query,
@@ -972,6 +1074,12 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
         emit_command_start(reporter, "resume-java-bff-loop", output=args.output.resolve())
         inspection = inspect_java_bff_loop(args.output.resolve())
         base_config = JavaBffLoopConfig.from_dict(inspection["state"]["config"])
+        cline_bridge_command = resolve_cline_bridge_command(
+            args,
+            output_dir=args.output.resolve(),
+            mode="java-bff",
+            runner_mode=base_config.runner_mode,
+        )
         if args.provider_config:
             base_config.provider_config_path = args.provider_config.resolve()
         if args.provider_base_url is not None:
@@ -990,8 +1098,8 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
             base_config.temperature = args.temperature
         if args.timeout_seconds is not None:
             base_config.timeout_seconds = args.timeout_seconds
-        if args.cline_bridge_command is not None:
-            base_config.cline_bridge_command = args.cline_bridge_command
+        if cline_bridge_command is not None:
+            base_config.cline_bridge_command = cline_bridge_command
         if args.package_name is not None:
             base_config.package_name = args.package_name
         payload = resume_java_bff_loop(args.output.resolve(), config=base_config, reporter=reporter)
