@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.26.0 - 2026-03-16
+
+- Added `analysis/handoff/*/session.json`, `export-cline-session-pack`, and `resume-from-handoff` so Cline/VS Code prompt packs now carry a concrete response path, retry budget, and ready-to-run follow-up commands.
+- Added `watch-cline-directory`, which scans pending handoff sessions, picks up completed response files, runs review automatically, and writes `analysis/watch_review/session_watch.json|.md`.
+- Extended `watch-and-review` to update session status, attempt counts, last repair pack, last adaptive retry artifacts, and watch-report paths so operator flows can continue without manual bookkeeping.
+- Extended `doctor-run` with `retry_scoreboard` and handoff-aware recommended actions, making retry-ready sessions and human-review-required sessions visible in the main operator diagnosis.
+- Added `analysis/handoff_explorer.html` plus richer `analysis/operator_console.html` cards so operators can browse session packs, retry pressure, response-file readiness, and next commands in a browser.
+- Expanded the artifact catalog, README, and Cline quick start to document session packs, auto-watch flows, and the most direct retry path for company Qwen3-class models under a 128k limit.
+- Added tests covering session-pack export, resume-from-handoff, watch-cline-directory, and doctor retry scoreboards.
+
 ## 1.23.0 - 2026-03-16
 
 - Added `retry-from-doctor`, which turns the latest doctor diagnosis into a retry-ready plan with generated repair handoff packs and adaptive prompt variants.

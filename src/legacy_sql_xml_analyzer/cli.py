@@ -26,7 +26,7 @@ from .evolution import (
     simulate_candidate_profile,
 )
 from .failure_explainer import explain_failure_from_output_dir
-from .handoff import export_vscode_cline_pack
+from .handoff import export_vscode_cline_pack, resume_from_handoff
 from .java_bff import prepare_java_bff_from_input
 from .java_bff_context import compile_java_bff_context_pack, write_java_bff_context_pack
 from .java_bff_loop import (
@@ -49,7 +49,7 @@ from .prompt_profiles import phase_budget_for
 from .prompting import prepare_prompt_pack_from_analysis, resolve_analysis_root
 from .schemas import LoopConfig
 from .validation import validate_profile
-from .watch_review import watch_and_review
+from .watch_review import watch_and_review, watch_cline_directory
 from .web import serve_report
 
 
@@ -330,6 +330,24 @@ def build_parser() -> argparse.ArgumentParser:
     export_handoff_parser.add_argument("--profile-name", default="company-qwen3-java-phase", help="Company weak-model prompt profile.")
     export_handoff_parser.add_argument("--output-dir", type=Path, help="Optional output directory for the generated handoff pack.")
 
+    export_session_parser = subparsers.add_parser(
+        "export-cline-session-pack",
+        help="Export a handoff/session pack with ready-to-run watch/review commands for Cline CLI or the VS Code extension.",
+    )
+    export_session_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    export_session_parser.add_argument("--cluster", help="Generic cluster_id.")
+    export_session_parser.add_argument("--stage", choices=["classify", "propose", "verify"], help="Generic stage when --cluster is used.")
+    export_session_parser.add_argument("--prompt-json", type=Path, help="Java BFF phase prompt JSON path.")
+    export_session_parser.add_argument("--review", type=Path, help="Review JSON path used to create a repair handoff pack.")
+    export_session_parser.add_argument("--profile-name", default="company-qwen3-java-phase", help="Company weak-model prompt profile.")
+    export_session_parser.add_argument("--output-dir", type=Path, help="Optional output directory for the generated handoff pack.")
+
+    resume_handoff_parser = subparsers.add_parser(
+        "resume-from-handoff",
+        help="Inspect a handoff pack/session and produce the next recommended action and command.",
+    )
+    resume_handoff_parser.add_argument("--pack", required=True, type=Path, help="Path to a handoff pack.json or session.json.")
+
     doctor_parser = subparsers.add_parser(
         "doctor-run",
         help="Inspect an analysis output directory and generate actionable operator guidance.",
@@ -355,6 +373,16 @@ def build_parser() -> argparse.ArgumentParser:
     watch_review_parser.add_argument("--timeout-seconds", type=float, default=300.0, help="Maximum time to wait for the response file.")
     watch_review_parser.add_argument("--poll-seconds", type=float, default=2.0, help="Polling interval while waiting for the response file.")
     watch_review_parser.add_argument("--no-repair-pack", action="store_true", help="Do not emit a repair handoff pack when review fails.")
+
+    watch_cline_parser = subparsers.add_parser(
+        "watch-cline-directory",
+        help="Watch all handoff sessions for response files and review them automatically.",
+    )
+    watch_cline_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    watch_cline_parser.add_argument("--timeout-seconds", type=float, default=300.0, help="Maximum time to wait for any pending handoff response.")
+    watch_cline_parser.add_argument("--poll-seconds", type=float, default=2.0, help="Polling interval while waiting for responses.")
+    watch_cline_parser.add_argument("--no-repair-pack", action="store_true", help="Do not emit repair handoff packs when review fails.")
+    watch_cline_parser.add_argument("--process-once", action="store_true", help="Only process responses that already exist, then exit.")
 
     adaptive_context_parser = subparsers.add_parser(
         "compile-adaptive-context",
@@ -567,9 +595,12 @@ def build_parser() -> argparse.ArgumentParser:
             emit_company_prompt_parser,
             repair_company_prompt_parser,
             export_handoff_parser,
+            export_session_parser,
             doctor_parser,
             retry_doctor_parser,
             watch_review_parser,
+            watch_cline_parser,
+            resume_handoff_parser,
             adaptive_context_parser,
             shrink_prompt_parser,
             context_parser,
@@ -681,6 +712,25 @@ def build_command_artifact_hints(args: argparse.Namespace) -> list[str]:
                 str(analysis_root / "handoff"),
             ]
         )
+    if command == "export-cline-session-pack" and getattr(args, "analysis_root", None):
+        analysis_root = resolve_analysis_root(args.analysis_root.resolve())
+        hints.append(str(analysis_root / "handoff"))
+    if command == "watch-cline-directory" and getattr(args, "analysis_root", None):
+        analysis_root = resolve_analysis_root(args.analysis_root.resolve())
+        hints.extend(
+            [
+                str(analysis_root / "watch_review" / "session_watch.json"),
+                str(analysis_root / "handoff"),
+            ]
+        )
+    if command == "resume-from-handoff" and getattr(args, "pack", None):
+        pack = args.pack.resolve()
+        hints.extend(
+            [
+                str(pack.parent / "session.json"),
+                str(pack.parent / "resume_report.json"),
+            ]
+        )
     if command == "validate-provider" and getattr(args, "output", None):
         output = args.output.resolve()
         hints.append(str(output / "analysis" / "provider_validation"))
@@ -710,6 +760,10 @@ def build_error_hints(args: argparse.Namespace, exc: Exception) -> list[str]:
         hints.append("Use `inspect-java-bff-loop` after a stopped run to inspect the latest prompt, review, and missing artifacts.")
     if command == "watch-and-review":
         hints.append("If review fails, inspect the generated repair pack under analysis/handoff and retry the same phase with a smaller context.")
+    if command == "watch-cline-directory":
+        hints.append("Inspect analysis/watch_review/session_watch.json and the updated handoff session/lifecycle files to see which response was processed.")
+    if command == "resume-from-handoff":
+        hints.append("Open the generated resume_report.json and use the suggested next command from the handoff session.")
     if command == "retry-from-doctor":
         hints.append("Open analysis/doctor/retry_plan.json and use the generated repair handoff pack or adaptive prompt artifacts for the next retry.")
     if not hints:
@@ -1031,6 +1085,32 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
         )
         return 0
 
+    if args.command == "export-cline-session-pack":
+        emit_command_start(reporter, "export-cline-session-pack", analysis_root=args.analysis_root.resolve())
+        if args.cluster and not args.stage:
+            raise ValueError("--stage is required when --cluster is used.")
+        payload = export_vscode_cline_pack(
+            analysis_root=args.analysis_root.resolve(),
+            cluster_id=args.cluster,
+            stage=args.stage,
+            prompt_json=args.prompt_json.resolve() if args.prompt_json else None,
+            review_path=args.review.resolve() if args.review else None,
+            output_dir=args.output_dir.resolve() if args.output_dir else None,
+            profile_name=args.profile_name,
+        )
+        reporter.success(
+            f"Exported session pack '{payload['title']}' with session={payload.get('session_path')}."
+        )
+        return 0
+
+    if args.command == "resume-from-handoff":
+        emit_command_start(reporter, "resume-from-handoff", pack=args.pack.resolve())
+        payload = resume_from_handoff(args.pack.resolve())
+        reporter.success(
+            f"Next action={payload['next_action']} status={payload['status']} report={payload['json_path']}."
+        )
+        return 0
+
     if args.command == "doctor-run":
         emit_command_start(reporter, "doctor-run", output=args.output.resolve())
         payload = doctor_run(args.output.resolve())
@@ -1064,6 +1144,20 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
         )
         reporter.success(
             f"Reviewed watched response kind={payload['kind']} status={payload['status']} report={payload['json_path']}."
+        )
+        return 0
+
+    if args.command == "watch-cline-directory":
+        emit_command_start(reporter, "watch-cline-directory", analysis_root=args.analysis_root.resolve())
+        payload = watch_cline_directory(
+            analysis_root=args.analysis_root.resolve(),
+            timeout_seconds=args.timeout_seconds,
+            poll_seconds=args.poll_seconds,
+            emit_repair_pack=not args.no_repair_pack,
+            process_once=bool(args.process_once),
+        )
+        reporter.success(
+            f"Processed {payload['processed_count']} handoff session(s), pending={payload['pending_session_count']} report={payload['json_path']}."
         )
         return 0
 

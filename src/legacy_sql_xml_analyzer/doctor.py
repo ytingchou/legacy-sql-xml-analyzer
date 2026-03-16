@@ -20,6 +20,7 @@ def doctor_run(output_dir: Path) -> dict[str, Any]:
     java_completion = load_json(analysis_root / "java_bff" / "loop" / "completion_report.json")
     provider_rows = load_provider_rows(analysis_root / "provider_validation")
     response_scoreboard = build_response_scoreboard(analysis_root)
+    retry_scoreboard = build_retry_scoreboard(analysis_root)
     history_trend = build_history_trend(analysis_root)
     handoff_lifecycle = summarize_handoff_lifecycle(analysis_root)
     phase_queue = build_phase_queue_summary(analysis_root)
@@ -32,8 +33,15 @@ def doctor_run(output_dir: Path) -> dict[str, Any]:
         "java_bff_loop": summarize_loop(java_completion),
         "provider_validations": provider_rows,
         "failure_summary": summarize_failures(failure_payload["index"]),
-        "recommended_actions": build_recommended_actions(generic_completion, java_completion, provider_rows, failure_payload["index"]),
+        "recommended_actions": build_recommended_actions(
+            generic_completion,
+            java_completion,
+            provider_rows,
+            failure_payload["index"],
+            retry_scoreboard,
+        ),
         "response_scoreboard": response_scoreboard,
+        "retry_scoreboard": retry_scoreboard,
         "history_trend": history_trend,
         "handoff_lifecycle": handoff_lifecycle,
         "phase_queue": phase_queue,
@@ -225,6 +233,51 @@ def build_response_scoreboard(analysis_root: Path) -> dict[str, Any]:
     return {"rows": rows, "total_reviews": sum(int(item["review_count"]) for item in rows)}
 
 
+def build_retry_scoreboard(analysis_root: Path) -> dict[str, Any]:
+    from .handoff import list_handoff_sessions
+
+    sessions = list_handoff_sessions(analysis_root)
+    state_counts: dict[str, int] = {}
+    attempts_total = 0
+    retry_ready = 0
+    human_review_required = 0
+    resolved = 0
+    rows: list[dict[str, Any]] = []
+    for item in sessions:
+        state = str(item.get("state") or "unknown")
+        state_counts[state] = state_counts.get(state, 0) + 1
+        attempts = int(item.get("attempt_count", 0) or 0)
+        attempts_total += attempts
+        status = str(item.get("status") or "pending_response")
+        if status == "retry_ready":
+            retry_ready += 1
+        elif status == "human_review_required":
+            human_review_required += 1
+        elif status == "resolved":
+            resolved += 1
+        rows.append(
+            {
+                "title": item.get("title"),
+                "kind": item.get("kind"),
+                "status": status,
+                "state": state,
+                "attempt_count": attempts,
+                "max_attempts": int(item.get("max_attempts", 0) or 0),
+                "session_path": item.get("session_path"),
+            }
+        )
+    session_count = len(sessions)
+    return {
+        "session_count": session_count,
+        "retry_ready_count": retry_ready,
+        "human_review_required_count": human_review_required,
+        "resolved_count": resolved,
+        "average_attempts": round(attempts_total / session_count, 2) if session_count else 0.0,
+        "state_counts": state_counts,
+        "rows": rows[:20],
+    }
+
+
 def build_history_trend(analysis_root: Path) -> dict[str, Any]:
     generic_history = load_json_list(analysis_root / "agent_loop" / "phase_history.json")
     java_history = load_json_list(analysis_root / "java_bff" / "loop" / "phase_history.json")
@@ -355,6 +408,7 @@ def build_recommended_actions(
     java_completion: dict[str, Any] | None,
     provider_rows: list[dict[str, Any]],
     failure_index: dict[str, Any],
+    retry_scoreboard: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if any(str(row.get("status")) == "failed" for row in provider_rows):
@@ -379,6 +433,23 @@ def build_recommended_actions(
                 "category": "generic-loop",
                 "summary": "Resume the generic loop if XML/profile repair is still incomplete.",
                 "command": "PYTHONPATH=src python3 -m legacy_sql_xml_analyzer resume-agent-loop --output <out_dir>",
+            }
+        )
+    retry_scoreboard = retry_scoreboard or {}
+    if int(retry_scoreboard.get("retry_ready_count", 0) or 0) > 0:
+        actions.append(
+            {
+                "category": "handoff-retry",
+                "summary": "Review retry-ready handoff sessions and process saved response files automatically.",
+                "command": "PYTHONPATH=src python3 -m legacy_sql_xml_analyzer watch-cline-directory --analysis-root <out_dir>",
+            }
+        )
+    if int(retry_scoreboard.get("human_review_required_count", 0) or 0) > 0:
+        actions.append(
+            {
+                "category": "handoff-human-review",
+                "summary": "Some handoff sessions exhausted retries and now need manual operator review.",
+                "command": "PYTHONPATH=src python3 -m legacy_sql_xml_analyzer resume-from-handoff --pack <analysis/handoff/.../session.json>",
             }
         )
     explanations = failure_index.get("explanations", []) if isinstance(failure_index, dict) else []
@@ -477,6 +548,18 @@ def render_doctor_markdown(payload: dict[str, Any]) -> str:
             f"- `{item['kind']}:{item['stage']}` reviews={item['review_count']} "
             f"accepted={item['accepted']} needs_revision={item['needs_revision']}"
         )
+    retry = payload.get("retry_scoreboard", {})
+    lines.extend(
+        [
+            "",
+            "## Retry Scoreboard",
+            f"- Sessions: {retry.get('session_count', 0)}",
+            f"- Resolved: {retry.get('resolved_count', 0)}",
+            f"- Retry ready: {retry.get('retry_ready_count', 0)}",
+            f"- Human review required: {retry.get('human_review_required_count', 0)}",
+            f"- Average attempts: {retry.get('average_attempts', 0.0)}",
+        ]
+    )
     if payload.get("latest_review_candidate"):
         latest = payload["latest_review_candidate"]
         lines.extend(

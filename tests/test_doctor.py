@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from legacy_sql_xml_analyzer.doctor import doctor_run, retry_from_doctor
+from legacy_sql_xml_analyzer.handoff import export_vscode_cline_pack
 from tests.support import load_json, make_analysis_root, write_failure_clusters, write_query_card
 
 
@@ -35,6 +36,31 @@ class DoctorRunTests(unittest.TestCase):
                 json.dumps({"status": "failed", "provider_name": "demo", "provider_model": "qwen3"}),
                 encoding="utf-8",
             )
+            write_failure_clusters(
+                analysis_root,
+                [
+                    {
+                        "cluster_id": "reference_target_missing",
+                        "code": "REFERENCE_TARGET_MISSING",
+                        "severity": "error",
+                        "task_type": "mapping_inference",
+                        "occurrence_count": 1,
+                        "files_affected": 1,
+                        "queries_affected": 1,
+                        "representative_message": "Reference target missing.",
+                        "suggested_fix": "Verify target default order.",
+                        "common_context_keys": ["query_id"],
+                        "sample_diagnostics": [],
+                    }
+                ],
+            )
+            write_query_card(analysis_root, "orders.xml:main:OrderSearch", "# OrderSearch\n\nRelevant query card.")
+            export_vscode_cline_pack(
+                analysis_root,
+                cluster_id="reference_target_missing",
+                stage="propose",
+                profile_name="company-qwen3-propose",
+            )
 
             payload = doctor_run(root)
 
@@ -43,6 +69,8 @@ class DoctorRunTests(unittest.TestCase):
             self.assertTrue(Path(payload["json_path"]).exists())
             self.assertTrue(Path(payload["md_path"]).exists())
             self.assertIn("response_scoreboard", payload)
+            self.assertIn("retry_scoreboard", payload)
+            self.assertEqual(1, payload["retry_scoreboard"]["session_count"])
             self.assertIn("phase_queue", payload)
 
     def test_retry_from_doctor_generates_retry_plan_and_artifacts(self) -> None:

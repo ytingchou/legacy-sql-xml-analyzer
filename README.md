@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.23.0`
+Current local release: `v1.26.0`
 
 Quick start guides:
 
@@ -23,7 +23,7 @@ For company environments using `Cline CLI` or the VS Code Cline extension with a
 2. Export a copy-ready handoff pack with `emit-company-prompt`, `repair-company-prompt`, or `export-vscode-cline-pack`.
 3. Feed only the generated `prompt.txt` to Cline, not the full `analysis/` tree.
 4. Review the response with `review-llm-response` or `review-java-bff-response`.
-5. If a loop stalls, run `explain-failure` and use the generated repair prompt or recommended command.
+5. If a loop stalls, run `doctor-run`, `watch-cline-directory`, or `resume-from-handoff` instead of guessing the next retry step.
 
 Useful commands:
 
@@ -33,8 +33,11 @@ PYTHONPATH=src python3 -m legacy_sql_xml_analyzer doctor-run --output ./analysis
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer retry-from-doctor --output ./analysis-output
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer emit-company-prompt --analysis-root ./analysis-output --cluster reference_target_missing --stage propose
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer export-vscode-cline-pack --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer export-cline-session-pack --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer compile-adaptive-context --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer watch-and-review --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json --response ./phase.response.json --source-pack ./analysis-output/analysis/handoff/<pack>/pack.json
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer watch-cline-directory --analysis-root ./analysis-output
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer resume-from-handoff --pack ./analysis-output/analysis/handoff/<pack>/session.json
 ```
 
 New operator-facing artifacts:
@@ -45,10 +48,12 @@ New operator-facing artifacts:
 - `analysis/failure_console.html`: web view for failure explanations and troubleshooting
 - `analysis/operator_console.html`: single-page operator view for loops, doctor guidance, handoff packs, and next commands
 - `analysis/bundle_explorer.html`: Java BFF bundle queue, delivery readiness, and quality gate explorer
+- `analysis/handoff_explorer.html`: session-oriented view for handoff packs, retries, response files, and next commands
 - `analysis/doctor/doctor_report.json`: machine-readable diagnosis for provider, loop, and failure states
 - `analysis/doctor/retry_plan.json`: retry-ready plan with repair packs and adaptive prompt variants
 - `analysis/adaptive_prompts/*`: smaller retry-ready prompt/context variants for weaker models
 - `analysis/handoff/*/lifecycle.json`: lifecycle state for each handoff pack
+- `analysis/handoff/*/session.json`: response target, retry policy, and ready-to-run commands for Cline/VS Code execution
 
 ## Usage
 
@@ -113,16 +118,19 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/failure_console.html`: static failure console for troubleshooting weak-model, bridge, and provider issues
 - `analysis/operator_console.html`: static operator console for loop state, doctor guidance, and recent handoff packs
 - `analysis/bundle_explorer.html`: static Java bundle explorer for phase queue and delivery readiness
+- `analysis/handoff_explorer.html`: static session explorer for retry readiness, watch-and-review flow, and response files
 - `analysis/doctor/doctor_report.json`: machine-readable doctor report with recommended commands
 - `analysis/doctor/doctor_report.md`: human-readable doctor report
 - `analysis/doctor/retry_plan.json`: retry-ready plan generated from the latest doctor diagnosis
 - `analysis/doctor/retry_plan.md`: human-readable retry plan
 - `analysis/adaptive_prompts/*.adaptive.json`: multi-budget prompt/context variants for retry cycles
 - `analysis/watch_review/*.json`: automated watch-and-review results with repair-pack references
+- `analysis/watch_review/session_watch.json`: batch watch-and-review summary for pending handoff sessions
 - `analysis/failure_explanations/index.json`: aggregated actionable failure explanations
 - `analysis/failure_explanations/*.md`: per-failure troubleshooting cards with recommended commands and company-LLM prompts
 - `analysis/handoff/*/pack.json`: Cline / VS Code handoff pack metadata
 - `analysis/handoff/*/lifecycle.json`: handoff lifecycle state and history
+- `analysis/handoff/*/session.json`: Cline/VS Code execution session contract with response path, retry policy, and next commands
 - `analysis/handoff/*/prompt.txt`: copy-ready prompt for company weak models
 - `analysis/failure_clusters.json`: grouped diagnostic families for repeated issues
 - `analysis/failure_clusters.md`: human-readable failure family summary

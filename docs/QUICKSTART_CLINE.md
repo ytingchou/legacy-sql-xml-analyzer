@@ -317,6 +317,22 @@ This creates:
 - `analysis/handoff/*/schema.json`
 - `analysis/handoff/*/response_template.json`
 - `analysis/handoff/*/operator_notes.md`
+- `analysis/handoff/*/session.json`
+
+If you want the analyzer to manage retries and follow-up automatically, export a session pack instead of only a prompt pack:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer export-cline-session-pack \
+  --analysis-root "$OUT_DIR" \
+  --prompt-json "$OUT_DIR/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json"
+```
+
+The `session.json` file gives you:
+
+- where to save the Cline response
+- the ready-to-run `watch_and_review` command
+- retry targets and current attempt count
+- the latest repair/adaptive retry artifacts after review
 
 If a review already failed and you need the next repair prompt:
 
@@ -330,6 +346,20 @@ If you want the analyzer to tell you the safest next command instead of guessing
 
 ```bash
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer doctor-run --output "$OUT_DIR"
+```
+
+If you already exported session packs and want the analyzer to auto-pick up completed responses:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer watch-cline-directory \
+  --analysis-root "$OUT_DIR"
+```
+
+If you need to inspect one stalled handoff pack and see the exact next command:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer resume-from-handoff \
+  --pack "$OUT_DIR/analysis/handoff/<pack>/session.json"
 ```
 
 If the current prompt is still too large for your company model, generate smaller retry variants:

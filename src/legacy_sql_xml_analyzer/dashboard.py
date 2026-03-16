@@ -439,6 +439,7 @@ def write_evolution_report(
     failure_console_path = analysis_root / "failure_console.html"
     operator_console_path = analysis_root / "operator_console.html"
     bundle_explorer_path = analysis_root / "bundle_explorer.html"
+    handoff_explorer_path = analysis_root / "handoff_explorer.html"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_evolution_summary_markdown(summary), encoding="utf-8")
     scoreboard_json_path.write_text(
@@ -485,6 +486,10 @@ def write_evolution_report(
         render_bundle_explorer_html(build_bundle_explorer_summary(output_dir)),
         encoding="utf-8",
     )
+    handoff_explorer_path.write_text(
+        render_handoff_explorer_html(build_handoff_explorer_summary(output_dir)),
+        encoding="utf-8",
+    )
     return [
         artifact_descriptor_for_path(json_path, "json", "Evolution summary", "prompting"),
         artifact_descriptor_for_path(md_path, "markdown", "Evolution summary (Markdown)", "prompting"),
@@ -495,6 +500,7 @@ def write_evolution_report(
         artifact_descriptor_for_path(failure_console_path, "html", "Failure console", "prompting"),
         artifact_descriptor_for_path(operator_console_path, "html", "Operator console", "prompting"),
         artifact_descriptor_for_path(bundle_explorer_path, "html", "Java bundle explorer", "prompting"),
+        artifact_descriptor_for_path(handoff_explorer_path, "html", "Handoff explorer", "prompting"),
     ]
 
 
@@ -705,6 +711,8 @@ def build_operator_console_summary(
                     "path": str(path.resolve()),
                 }
             )
+    recent_sessions = build_handoff_explorer_summary(output_dir).get("rows", [])[:10]
+    session_watch = load_json_payload(analysis_root / "watch_review" / "session_watch.json") or {}
     return {
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "doctor_status": doctor_payload.get("status"),
@@ -717,10 +725,13 @@ def build_operator_console_summary(
         "handoff_pack_count": prompt_lab_summary.get("handoff_pack_count", 0),
         "handoff_rows": handoff_rows,
         "handoff_state_counts": doctor_payload.get("handoff_lifecycle", {}).get("state_counts", {}),
+        "retry_scoreboard": doctor_payload.get("retry_scoreboard", {}),
         "phase_queue": doctor_payload.get("phase_queue", {}),
         "response_scoreboard": doctor_payload.get("response_scoreboard", {}).get("rows", []),
         "history_trend": doctor_payload.get("history_trend", {}),
         "latest_review_candidate": doctor_payload.get("latest_review_candidate"),
+        "recent_sessions": recent_sessions,
+        "session_watch": session_watch,
     }
 
 
@@ -752,6 +763,16 @@ def render_operator_console_html(summary: dict[str, Any]) -> str:
     latest_review = summary.get("latest_review_candidate") or {}
     handoff_states = summary.get("handoff_state_counts", {})
     history_trend = summary.get("history_trend", {})
+    retry_scoreboard = summary.get("retry_scoreboard", {})
+    session_watch = summary.get("session_watch", {})
+    session_rows = "".join(
+        f"<tr><td>{escape_html(str(item.get('title') or 'n/a'))}</td>"
+        f"<td>{escape_html(str(item.get('status') or 'n/a'))}</td>"
+        f"<td>{escape_html(str(item.get('attempt_count') or 0))} / {escape_html(str(item.get('max_attempts') or 0))}</td>"
+        f"<td>{escape_html(str(item.get('response_exists')))}</td>"
+        f"<td>{escape_html(str(item.get('session_path') or 'n/a'))}</td></tr>"
+        for item in summary.get("recent_sessions", [])
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -794,6 +815,12 @@ def render_operator_console_html(summary: dict[str, Any]) -> str:
     <div class="card"><strong>{summary.get('phase_queue', {}).get('bundle_count', 0)}</strong><div>Java Bundles</div></div>
     <div class="card"><strong>{summary.get('phase_queue', {}).get('pending_bundle_count', 0)}</strong><div>Pending Bundles</div></div>
   </div>
+  <div class="grid">
+    <div class="card"><strong>{retry_scoreboard.get('session_count', 0)}</strong><div>Session Packs</div></div>
+    <div class="card"><strong>{retry_scoreboard.get('retry_ready_count', 0)}</strong><div>Retry Ready</div></div>
+    <div class="card"><strong>{retry_scoreboard.get('human_review_required_count', 0)}</strong><div>Human Review Needed</div></div>
+    <div class="card"><strong>{session_watch.get('processed_count', 0)}</strong><div>Recent Watched Sessions</div></div>
+  </div>
   <h2>Recommended Actions</h2>
   <table><thead><tr><th>Category</th><th>Summary</th><th>Command</th></tr></thead><tbody>{action_rows or '<tr><td colspan="3">No actions</td></tr>'}</tbody></table>
   <h2>Latest Retry Candidate</h2>
@@ -806,9 +833,11 @@ def render_operator_console_html(summary: dict[str, Any]) -> str:
   <table><thead><tr><th>Bundle</th><th>Completed</th><th>Pending</th><th>Status</th><th>Next Prompt</th></tr></thead><tbody>{queue_rows or '<tr><td colspan="5">No Java bundle queue yet</td></tr>'}</tbody></table>
   <h2>Response Scoreboard</h2>
   <table><thead><tr><th>Kind</th><th>Stage/Phase</th><th>Reviews</th><th>Accepted</th><th>Needs Revision</th><th>Acceptance</th></tr></thead><tbody>{response_rows or '<tr><td colspan="6">No review data yet</td></tr>'}</tbody></table>
+  <h2>Recent Session Packs</h2>
+  <table><thead><tr><th>Title</th><th>Status</th><th>Attempts</th><th>Response Exists</th><th>Session Path</th></tr></thead><tbody>{session_rows or '<tr><td colspan="5">No session packs</td></tr>'}</tbody></table>
   <h2>Recent Handoff Packs</h2>
   <table><thead><tr><th>Title</th><th>Profile</th><th>Path</th></tr></thead><tbody>{handoff_rows or '<tr><td colspan="3">No handoff packs</td></tr>'}</tbody></table>
-  <div><a href="dashboard.html">Dashboard</a> · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a> · <a href="bundle_explorer.html">Bundle Explorer</a> · <a href="evolution_console.html">Evolution Console</a></div>
+  <div><a href="dashboard.html">Dashboard</a> · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a> · <a href="bundle_explorer.html">Bundle Explorer</a> · <a href="handoff_explorer.html">Handoff Explorer</a> · <a href="evolution_console.html">Evolution Console</a></div>
 </body>
 </html>
 """
@@ -894,7 +923,93 @@ def render_bundle_explorer_html(summary: dict[str, Any]) -> str:
     <thead><tr><th>Bundle</th><th>Merged Ready</th><th>Delivery Ready</th><th>Blockers</th><th>Phase Status</th><th>Next Steps</th><th>Quality Gate</th></tr></thead>
     <tbody>{''.join(rows) or '<tr><td colspan=\"7\">No Java bundles available</td></tr>'}</tbody>
   </table>
-  <div style="margin-top:20px;"><a href="operator_console.html">Operator Console</a> · <a href="dashboard.html">Dashboard</a> · <a href="failure_console.html">Failure Console</a></div>
+  <div style="margin-top:20px;"><a href="operator_console.html">Operator Console</a> · <a href="dashboard.html">Dashboard</a> · <a href="failure_console.html">Failure Console</a> · <a href="handoff_explorer.html">Handoff Explorer</a></div>
+</body>
+</html>
+"""
+
+
+def build_handoff_explorer_summary(output_dir: Path) -> dict[str, Any]:
+    analysis_root = output_dir / "analysis"
+    handoff_root = analysis_root / "handoff"
+    session_watch = load_json_payload(analysis_root / "watch_review" / "session_watch.json") or {}
+    rows: list[dict[str, Any]] = []
+    for session_path in sorted(handoff_root.glob("*/session.json")):
+        payload = load_json_payload(session_path)
+        if not payload:
+            continue
+        response_path = Path(str(payload.get("response_path") or ""))
+        rows.append(
+            {
+                "title": payload.get("title") or session_path.parent.name,
+                "kind": payload.get("kind"),
+                "profile_name": payload.get("profile_name"),
+                "status": payload.get("status"),
+                "state": payload.get("state"),
+                "attempt_count": int(payload.get("attempt_count", 0) or 0),
+                "max_attempts": int(payload.get("max_attempts", 0) or 0),
+                "response_exists": response_path.exists(),
+                "response_path": str(response_path.resolve()) if response_path.exists() else str(response_path),
+                "session_path": str(session_path.resolve()),
+                "last_review_path": payload.get("last_review_path"),
+                "last_watch_report_path": payload.get("last_watch_report_path"),
+                "retry_count": len(payload.get("last_adaptive_retry", []) or []),
+                "repair_count": len(payload.get("last_repair_pack", []) or []),
+                "next_command": (payload.get("suggested_commands") or {}).get("watch_and_review"),
+            }
+        )
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "session_count": len(rows),
+        "rows": rows[-50:],
+        "session_watch": session_watch,
+    }
+
+
+def render_handoff_explorer_html(summary: dict[str, Any]) -> str:
+    rows = "".join(
+        f"<tr><td>{escape_html(str(item['title']))}</td>"
+        f"<td>{escape_html(str(item.get('kind') or 'n/a'))}</td>"
+        f"<td>{escape_html(str(item.get('status') or 'n/a'))}</td>"
+        f"<td>{escape_html(str(item.get('state') or 'n/a'))}</td>"
+        f"<td>{escape_html(str(item.get('attempt_count') or 0))} / {escape_html(str(item.get('max_attempts') or 0))}</td>"
+        f"<td>{escape_html(str(item.get('response_exists')))}</td>"
+        f"<td>{escape_html(str(item.get('retry_count') or 0))}</td>"
+        f"<td>{escape_html(str(item.get('repair_count') or 0))}</td>"
+        f"<td>{escape_html(str(item.get('next_command') or 'n/a'))}</td>"
+        f"<td>{escape_html(str(item.get('session_path') or 'n/a'))}</td></tr>"
+        for item in summary.get("rows", [])
+    )
+    session_watch = summary.get("session_watch", {})
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Handoff Explorer</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; color: #12212e; background: #f6f7f8; }}
+    .grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 16px 0 24px; }}
+    .card {{ background: #fff; border: 1px solid #d9dee3; border-radius: 12px; padding: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; }}
+    th, td {{ border-bottom: 1px solid #e6eaee; text-align: left; padding: 10px; vertical-align: top; }}
+    th {{ background: #eef3f6; }}
+    code {{ font-family: ui-monospace, SFMono-Regular, monospace; }}
+  </style>
+</head>
+<body>
+  <h1>Handoff Explorer</h1>
+  <p>Session-oriented view for Cline/VS Code handoff packs, retry readiness, and watch-and-review follow-up.</p>
+  <div class="grid">
+    <div class="card"><strong>{summary.get('session_count', 0)}</strong><div>Session Packs</div></div>
+    <div class="card"><strong>{session_watch.get('processed_count', 0)}</strong><div>Recently Processed</div></div>
+    <div class="card"><strong>{session_watch.get('pending_session_count', 0)}</strong><div>Pending Sessions</div></div>
+    <div class="card"><strong>{len([item for item in summary.get('rows', []) if item.get('status') == 'human_review_required'])}</strong><div>Human Review Needed</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Title</th><th>Kind</th><th>Status</th><th>State</th><th>Attempts</th><th>Response Exists</th><th>Adaptive Retry</th><th>Repair Packs</th><th>Next Command</th><th>Session Path</th></tr></thead>
+    <tbody>{rows or '<tr><td colspan="10">No handoff sessions available</td></tr>'}</tbody>
+  </table>
+  <div style="margin-top:20px;"><a href="operator_console.html">Operator Console</a> · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a> · <a href="dashboard.html">Dashboard</a></div>
 </body>
 </html>
 """

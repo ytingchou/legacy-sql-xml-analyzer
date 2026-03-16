@@ -13,7 +13,13 @@ from .adaptive_prompt import (
     write_adaptive_payload,
 )
 from .evolution import review_llm_response_from_analysis
-from .handoff import export_vscode_cline_pack, update_handoff_lifecycle
+from .handoff import (
+    export_vscode_cline_pack,
+    list_handoff_sessions,
+    load_handoff_session,
+    update_handoff_lifecycle,
+    update_handoff_session,
+)
 from .java_bff_runtime import review_java_bff_response_from_analysis
 from .prompting import resolve_analysis_root
 from .context_compiler import estimate_tokens
@@ -34,6 +40,7 @@ def watch_and_review(
     analysis_root = resolve_analysis_root(analysis_root)
     started = time.time()
     response_path = response_path.resolve()
+    session_path = source_pack_path.resolve().parent / "session.json" if source_pack_path is not None else None
     while not response_path.exists():
         if time.time() - started > timeout_seconds:
             raise TimeoutError(f"Timed out waiting for response file: {response_path}")
@@ -48,6 +55,14 @@ def watch_and_review(
                 notes=["A response file was detected for this handoff pack."],
                 related_artifacts=[str(response_path)],
             )
+            if session_path is not None and session_path.exists():
+                update_handoff_session(
+                    session_path,
+                    status="reviewing",
+                    state="used",
+                    attempt_increment=1,
+                    notes=["Response received; starting Java BFF review."],
+                )
         result = review_java_bff_response_from_analysis(analysis_root, prompt_json.resolve(), response_path)
         review = result["review"]
         payload = {
@@ -81,6 +96,21 @@ def watch_and_review(
                     notes=["The reviewed response needs revision; use the generated repair pack or adaptive prompt."],
                     related_artifacts=[str(review.get("review_json_path") or ""), *repair["written_paths"], *adaptive_paths],
                 )
+                if session_path is not None and session_path.exists():
+                    session_payload = load_handoff_session(session_path)
+                    max_attempts = int(session_payload.get("max_attempts", 3))
+                    next_status = "human_review_required" if int(session_payload.get("attempt_count", 0)) >= max_attempts else "retry_ready"
+                    next_state = "repaired" if next_status == "retry_ready" else "resolved"
+                    update_handoff_session(
+                        session_path,
+                        status=next_status,
+                        state=next_state,
+                        review_path=str(review.get("review_json_path") or ""),
+                        watch_report_path=None,
+                        adaptive_retry=adaptive_paths,
+                        repair_pack=repair["written_paths"],
+                        notes=[f"Java review returned {review['status']}."],
+                    )
         elif source_pack_path is not None and review["status"] in {"accepted", "insufficient_evidence"}:
             update_handoff_lifecycle(
                 source_pack_path.resolve(),
@@ -89,7 +119,25 @@ def watch_and_review(
                 notes=[f"Review status={review['status']}"],
                 related_artifacts=[str(review.get("review_json_path") or ""), str(response_path)],
             )
-        return write_watch_payload(analysis_root, payload)
+            if session_path is not None and session_path.exists():
+                update_handoff_session(
+                    session_path,
+                    status="resolved",
+                    state="resolved",
+                    review_path=str(review.get("review_json_path") or ""),
+                    watch_report_path=None,
+                    notes=[f"Java review returned {review['status']}."],
+                )
+        written = write_watch_payload(analysis_root, payload)
+        if session_path is not None and session_path.exists():
+            update_handoff_session(
+                session_path,
+                status=load_handoff_session(session_path).get("status", "reviewed"),
+                state=load_handoff_session(session_path).get("state"),
+                watch_report_path=str(written["json_path"]),
+                notes=["Watch-and-review report written."],
+            )
+        return written
 
     if not cluster_id or not stage:
         raise ValueError("Generic watch-and-review requires --cluster and --stage.")
@@ -101,6 +149,14 @@ def watch_and_review(
             notes=["A response file was detected for this handoff pack."],
             related_artifacts=[str(response_path)],
         )
+        if session_path is not None and session_path.exists():
+            update_handoff_session(
+                session_path,
+                status="reviewing",
+                state="used",
+                attempt_increment=1,
+                notes=["Response received; starting generic review."],
+            )
     result = review_llm_response_from_analysis(
         analysis_root=analysis_root,
         cluster_id=cluster_id,
@@ -144,6 +200,20 @@ def watch_and_review(
                 notes=["The reviewed response needs revision; use the generated repair pack or adaptive prompt."],
                 related_artifacts=[str(review.get("review_json_path") or ""), *repair["written_paths"], *adaptive_paths],
             )
+            if session_path is not None and session_path.exists():
+                session_payload = load_handoff_session(session_path)
+                max_attempts = int(session_payload.get("max_attempts", 3))
+                next_status = "human_review_required" if int(session_payload.get("attempt_count", 0)) >= max_attempts else "retry_ready"
+                next_state = "repaired" if next_status == "retry_ready" else "resolved"
+                update_handoff_session(
+                    session_path,
+                    status=next_status,
+                    state=next_state,
+                    review_path=str(review.get("review_json_path") or ""),
+                    adaptive_retry=adaptive_paths,
+                    repair_pack=repair["written_paths"],
+                    notes=[f"Generic review returned {review['status']}."],
+                )
     elif source_pack_path is not None and review["status"] in {"accepted", "insufficient_evidence"}:
         update_handoff_lifecycle(
             source_pack_path.resolve(),
@@ -152,7 +222,113 @@ def watch_and_review(
             notes=[f"Review status={review['status']}"],
             related_artifacts=[str(review.get("review_json_path") or ""), str(response_path)],
         )
-    return write_watch_payload(analysis_root, payload)
+        if session_path is not None and session_path.exists():
+            update_handoff_session(
+                session_path,
+                status="resolved",
+                state="resolved",
+                review_path=str(review.get("review_json_path") or ""),
+                notes=[f"Generic review returned {review['status']}."],
+            )
+    written = write_watch_payload(analysis_root, payload)
+    if session_path is not None and session_path.exists():
+        update_handoff_session(
+            session_path,
+            status=load_handoff_session(session_path).get("status", "reviewed"),
+            state=load_handoff_session(session_path).get("state"),
+            watch_report_path=str(written["json_path"]),
+            notes=["Watch-and-review report written."],
+        )
+    return written
+
+
+def watch_cline_directory(
+    analysis_root: Path,
+    *,
+    timeout_seconds: float = 300.0,
+    poll_seconds: float = 2.0,
+    emit_repair_pack: bool = True,
+    process_once: bool = False,
+) -> dict[str, Any]:
+    analysis_root = resolve_analysis_root(analysis_root)
+    started = time.time()
+    processed: list[dict[str, Any]] = []
+    while True:
+        sessions = list_handoff_sessions(analysis_root)
+        pending = [
+            session
+            for session in sessions
+            if str(session.get("status") or "pending_response") in {"pending_response", "retry_ready", "reviewing"}
+        ]
+        for session in pending:
+            response_path = Path(str(session.get("response_path") or ""))
+            if not response_path.exists():
+                continue
+            pack_path = Path(str(session.get("pack_json_path") or ""))
+            if session.get("kind") == "generic_cluster":
+                result = watch_and_review(
+                    analysis_root=analysis_root,
+                    response_path=response_path,
+                    cluster_id=str(session.get("cluster_id") or ""),
+                    stage=str(session.get("stage") or ""),
+                    source_pack_path=pack_path,
+                    timeout_seconds=0.0,
+                    poll_seconds=poll_seconds,
+                    emit_repair_pack=emit_repair_pack,
+                )
+            else:
+                source_pack = load_handoff_session(Path(str(session.get("session_path") or pack_path.parent / "session.json")))
+                prompt_json = Path(str(source_pack.get("phase_pack_path") or ""))
+                result = watch_and_review(
+                    analysis_root=analysis_root,
+                    response_path=response_path,
+                    prompt_json=prompt_json,
+                    source_pack_path=pack_path,
+                    timeout_seconds=0.0,
+                    poll_seconds=poll_seconds,
+                    emit_repair_pack=emit_repair_pack,
+                )
+            processed.append(
+                {
+                    "title": session.get("title"),
+                    "session_path": session.get("session_path"),
+                    "response_path": str(response_path),
+                    "result_path": result.get("json_path"),
+                    "status": result.get("status"),
+                }
+            )
+        if processed and process_once:
+            break
+        if process_once:
+            break
+        if processed:
+            break
+        if time.time() - started > timeout_seconds:
+            break
+        time.sleep(poll_seconds)
+
+    payload = {
+        "generated_at": timestamp_now(),
+        "analysis_root": str(analysis_root.resolve()),
+        "processed_count": len(processed),
+        "pending_session_count": len(
+            [
+                session
+                for session in list_handoff_sessions(analysis_root)
+                if str(session.get("status") or "pending_response") in {"pending_response", "retry_ready", "reviewing"}
+            ]
+        ),
+        "processed": processed,
+    }
+    root = analysis_root / "watch_review"
+    root.mkdir(parents=True, exist_ok=True)
+    json_path = root / "session_watch.json"
+    md_path = root / "session_watch.md"
+    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    md_path.write_text(render_session_watch_markdown(payload), encoding="utf-8")
+    payload["json_path"] = str(json_path.resolve())
+    payload["md_path"] = str(md_path.resolve())
+    return payload
 
 
 def write_watch_payload(analysis_root: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -188,6 +364,24 @@ def render_watch_markdown(payload: dict[str, Any]) -> str:
         lines.extend(["", "## Adaptive Retry Artifacts"])
         for item in adaptive_retry:
             lines.append(f"- `{item}`")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_session_watch_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Session Watch",
+        "",
+        f"- Processed sessions: `{payload['processed_count']}`",
+        f"- Pending sessions: `{payload['pending_session_count']}`",
+        "",
+        "## Processed",
+    ]
+    for item in payload.get("processed", []):
+        lines.append(
+            f"- `{item['title']}` status=`{item['status']}` response=`{item['response_path']}` result=`{item['result_path']}`"
+        )
+    if not payload.get("processed"):
+        lines.append("- None")
     return "\n".join(lines).rstrip() + "\n"
 
 
