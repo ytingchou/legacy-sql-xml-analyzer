@@ -269,6 +269,7 @@ Check:
 
 - `analysis/java_bff/reviews/`
 - `analysis/llm_reviews/`
+- `analysis/failure_explanations/`
 
 This usually means:
 
@@ -276,6 +277,36 @@ This usually means:
 - non-JSON output
 - model drift
 - too much context
+
+Generate an actionable diagnosis:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer explain-failure \
+  --output "$OUT_DIR"
+```
+
+If you want a copy-ready prompt for Cline CLI or the VS Code extension, export a handoff pack instead of assembling your own prompt:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer export-vscode-cline-pack \
+  --analysis-root "$OUT_DIR" \
+  --prompt-json "$OUT_DIR/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json"
+```
+
+This creates:
+
+- `analysis/handoff/*/prompt.txt`
+- `analysis/handoff/*/schema.json`
+- `analysis/handoff/*/response_template.json`
+- `analysis/handoff/*/operator_notes.md`
+
+If a review already failed and you need the next repair prompt:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer repair-company-prompt \
+  --analysis-root "$OUT_DIR" \
+  --review "$OUT_DIR/analysis/java_bff/reviews/<bundle>/<phase>-review.json"
+```
 
 ### The analyzer itself still has unresolved XML problems
 

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .failure_explainer import explain_failure_from_output_dir
 from .learning import load_profile
 from .models import AnalysisResult, ArtifactDescriptor, ResolvedQueryModel
 
@@ -429,6 +430,8 @@ def write_evolution_report(
     scoreboard_json_path = analysis_root / "prompt_scoreboard.json"
     scoreboard_csv_path = analysis_root / "prompt_scoreboard.csv"
     html_path = analysis_root / "evolution_console.html"
+    prompt_lab_path = analysis_root / "prompt_lab.html"
+    failure_console_path = analysis_root / "failure_console.html"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_evolution_summary_markdown(summary), encoding="utf-8")
     scoreboard_json_path.write_text(
@@ -455,12 +458,18 @@ def write_evolution_report(
         ],
     )
     html_path.write_text(render_evolution_console_html(summary), encoding="utf-8")
+    prompt_lab_summary = build_prompt_lab_summary(output_dir)
+    prompt_lab_path.write_text(render_prompt_lab_html(prompt_lab_summary), encoding="utf-8")
+    failure_payload = explain_failure_from_output_dir(output_dir)
+    failure_console_path.write_text(render_failure_console_html(failure_payload["index"]), encoding="utf-8")
     return [
         artifact_descriptor_for_path(json_path, "json", "Evolution summary", "prompting"),
         artifact_descriptor_for_path(md_path, "markdown", "Evolution summary (Markdown)", "prompting"),
         artifact_descriptor_for_path(scoreboard_json_path, "json", "Prompt scoreboard", "prompting"),
         artifact_descriptor_for_path(scoreboard_csv_path, "csv", "Prompt scoreboard export", "prompting"),
         artifact_descriptor_for_path(html_path, "html", "Evolution console", "prompting"),
+        artifact_descriptor_for_path(prompt_lab_path, "html", "Prompt lab", "prompting"),
+        artifact_descriptor_for_path(failure_console_path, "html", "Failure console", "prompting"),
     ]
 
 
@@ -517,6 +526,136 @@ def build_evolution_summary(output_dir: Path) -> dict[str, Any]:
             "candidate_profile_version": candidate_profile_payload.get("profile_version"),
         },
     }
+
+
+def build_prompt_lab_summary(output_dir: Path) -> dict[str, Any]:
+    analysis_root = output_dir / "analysis"
+    generic_packs = []
+    for path in sorted((analysis_root / "context_packs").glob("*.json")):
+        payload = load_json_payload(path)
+        if not payload:
+            continue
+        generic_packs.append(
+            {
+                "label": f"{payload.get('cluster_id')} / {payload.get('phase')}",
+                "estimated_tokens": int(payload.get("estimated_tokens", 0) or 0),
+                "profile": payload.get("prompt_profile"),
+                "path": str(path.resolve()),
+            }
+        )
+    java_packs = []
+    for path in sorted((analysis_root / "java_bff" / "context_packs").glob("*/*.json")):
+        payload = load_json_payload(path)
+        if not payload:
+            continue
+        java_packs.append(
+            {
+                "label": f"{payload.get('bundle_id')} / {payload.get('phase')}",
+                "estimated_tokens": int(payload.get("estimated_prompt_tokens", 0) or 0),
+                "profile": payload.get("prompt_profile"),
+                "path": str(path.resolve()),
+            }
+        )
+    handoff_packs = []
+    for path in sorted((analysis_root / "handoff").glob("*/pack.json")):
+        payload = load_json_payload(path)
+        if not payload:
+            continue
+        handoff_packs.append(
+            {
+                "label": payload.get("title"),
+                "estimated_tokens": estimate_text_tokens(str(payload.get("prompt_text") or "")),
+                "profile": payload.get("profile_name"),
+                "path": str(path.resolve()),
+            }
+        )
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "generic_pack_count": len(generic_packs),
+        "java_pack_count": len(java_packs),
+        "handoff_pack_count": len(handoff_packs),
+        "generic_packs": generic_packs[:20],
+        "java_packs": java_packs[:20],
+        "handoff_packs": handoff_packs[:20],
+    }
+
+
+def render_prompt_lab_html(summary: dict[str, Any]) -> str:
+    def render_rows(rows: list[dict[str, Any]]) -> str:
+        return "".join(
+            f"<tr><td>{escape_html(str(item['label']))}</td><td>{item['estimated_tokens']}</td>"
+            f"<td>{escape_html(str(item.get('profile') or 'n/a'))}</td><td>{escape_html(item['path'])}</td></tr>"
+            for item in rows
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Prompt Lab</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; color: #12212e; background: #f6f7f8; }}
+    h1, h2 {{ margin-bottom: 8px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 16px 0 24px; }}
+    .card {{ background: #fff; border: 1px solid #d9dee3; border-radius: 12px; padding: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; }}
+    th, td {{ border-bottom: 1px solid #e6eaee; text-align: left; padding: 10px; vertical-align: top; }}
+    th {{ background: #eef3f6; }}
+    code {{ font-family: ui-monospace, SFMono-Regular, monospace; }}
+  </style>
+</head>
+<body>
+  <h1>Prompt Lab</h1>
+  <p>Operator view for copy-ready prompt/context artifacts, handoff packs, and weak-model token budgets.</p>
+  <div class="grid">
+    <div class="card"><strong>{summary['generic_pack_count']}</strong><div>Generic Context Packs</div></div>
+    <div class="card"><strong>{summary['java_pack_count']}</strong><div>Java BFF Context Packs</div></div>
+    <div class="card"><strong>{summary['handoff_pack_count']}</strong><div>Cline Handoff Packs</div></div>
+  </div>
+  <h2>Handoff Packs</h2>
+  <table><thead><tr><th>Label</th><th>Est. Tokens</th><th>Profile</th><th>Path</th></tr></thead><tbody>{render_rows(summary['handoff_packs']) or '<tr><td colspan="4">No handoff packs yet</td></tr>'}</tbody></table>
+  <h2>Java BFF Context Packs</h2>
+  <table><thead><tr><th>Label</th><th>Est. Tokens</th><th>Profile</th><th>Path</th></tr></thead><tbody>{render_rows(summary['java_packs']) or '<tr><td colspan="4">No Java BFF context packs yet</td></tr>'}</tbody></table>
+  <h2>Generic Context Packs</h2>
+  <table><thead><tr><th>Label</th><th>Est. Tokens</th><th>Profile</th><th>Path</th></tr></thead><tbody>{render_rows(summary['generic_packs']) or '<tr><td colspan="4">No generic context packs yet</td></tr>'}</tbody></table>
+</body>
+</html>
+"""
+
+
+def render_failure_console_html(payload: dict[str, Any]) -> str:
+    rows = "".join(
+        f"<tr><td>{escape_html(item['failure_code'])}</td><td>{escape_html(item['summary'])}</td>"
+        f"<td>{escape_html(item['recommended_next_step'])}</td>"
+        f"<td>{escape_html(str(item.get('recommended_command') or 'n/a'))}</td></tr>"
+        for item in payload.get("explanations", [])
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Failure Console</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; color: #12212e; background: #f6f7f8; }}
+    .card {{ background: #fff; border: 1px solid #d9dee3; border-radius: 12px; padding: 16px; margin-bottom: 20px; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; }}
+    th, td {{ border-bottom: 1px solid #e6eaee; text-align: left; padding: 10px; vertical-align: top; }}
+    th {{ background: #eef3f6; }}
+    code {{ font-family: ui-monospace, SFMono-Regular, monospace; }}
+  </style>
+</head>
+<body>
+  <h1>Failure Console</h1>
+  <div class="card">
+    <strong>{payload.get('count', 0)}</strong> explanation(s) available.
+  </div>
+  <table>
+    <thead><tr><th>Code</th><th>Summary</th><th>Next Step</th><th>Recommended Command</th></tr></thead>
+    <tbody>{rows or '<tr><td colspan="4">No failure explanations yet</td></tr>'}</tbody>
+  </table>
+</body>
+</html>
+"""
 
 
 def build_provider_scoreboard(llm_run_summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -731,6 +870,10 @@ def load_json_payload(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def estimate_text_tokens(text: str) -> int:
+    return max(1, round(len(text) / 4)) if text else 0
 
 
 def load_json_list(path: Path, key: str) -> list[dict[str, Any]]:
@@ -1304,7 +1447,7 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
           <div class="metric"><strong>{evolution['headline']['accepted_reviews']}</strong><span>Accepted</span></div>
           <div class="metric"><strong>{evolution['headline']['accepted_patch_count']}</strong><span>Patches</span></div>
         </div>
-        <div class="footer"><a href="evolution_console.html">Open evolution console</a></div>
+        <div class="footer"><a href="evolution_console.html">Open evolution console</a> · <a href="prompt_lab.html">Open prompt lab</a> · <a href="failure_console.html">Open failure console</a></div>
       </div>
       <div class="panel">
         <h2>Provider Scoreboard</h2>
@@ -1598,7 +1741,7 @@ def render_evolution_console_html(summary: dict[str, Any]) -> str:
         </thead>
         <tbody>{cluster_rows or '<tr><td colspan=\"7\">No cluster activity yet</td></tr>'}</tbody>
       </table>
-      <div class="footer">Generated at {escape_html(summary['generated_at'])}</div>
+      <div class="footer">Generated at {escape_html(summary['generated_at'])} · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a></div>
     </section>
   </div>
 </body>

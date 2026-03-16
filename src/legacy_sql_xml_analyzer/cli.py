@@ -16,6 +16,8 @@ from .evolution import (
     review_llm_response_from_analysis,
     simulate_candidate_profile,
 )
+from .failure_explainer import explain_failure_from_output_dir
+from .handoff import export_vscode_cline_pack
 from .java_bff import prepare_java_bff_from_input
 from .java_bff_context import compile_java_bff_context_pack, write_java_bff_context_pack
 from .java_bff_loop import (
@@ -278,6 +280,45 @@ def build_parser() -> argparse.ArgumentParser:
     rollback_parser.add_argument("--reason", help="Optional rollback reason to stamp into lifecycle history.")
     rollback_parser.add_argument("--profile-name", help="Optional profile display name for the rolled-back profile.")
 
+    explain_failure_parser = subparsers.add_parser(
+        "explain-failure",
+        help="Summarize loop, review, and provider failures into actionable explanations and company-LLM prompts.",
+    )
+    explain_failure_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis artifacts.")
+    explain_failure_parser.add_argument("--scope", choices=["all", "generic", "java-bff"], default="all", help="Failure scope to summarize.")
+
+    emit_company_prompt_parser = subparsers.add_parser(
+        "emit-company-prompt",
+        help="Generate a company weak-LLM prompt pack from a generic cluster or a Java phase pack.",
+    )
+    emit_company_prompt_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    emit_company_prompt_parser.add_argument("--cluster", help="Generic cluster_id.")
+    emit_company_prompt_parser.add_argument("--stage", choices=["classify", "propose", "verify"], help="Generic stage when --cluster is used.")
+    emit_company_prompt_parser.add_argument("--prompt-json", type=Path, help="Java BFF phase prompt JSON path.")
+    emit_company_prompt_parser.add_argument("--profile-name", default="company-qwen3-java-phase", help="Company weak-model prompt profile.")
+    emit_company_prompt_parser.add_argument("--output-dir", type=Path, help="Optional output directory for the generated handoff pack.")
+
+    repair_company_prompt_parser = subparsers.add_parser(
+        "repair-company-prompt",
+        help="Generate a repair pack from a rejected generic or Java review JSON.",
+    )
+    repair_company_prompt_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    repair_company_prompt_parser.add_argument("--review", required=True, type=Path, help="Review JSON path.")
+    repair_company_prompt_parser.add_argument("--profile-name", default="company-qwen3-verify", help="Company weak-model prompt profile.")
+    repair_company_prompt_parser.add_argument("--output-dir", type=Path, help="Optional output directory for the generated handoff pack.")
+
+    export_handoff_parser = subparsers.add_parser(
+        "export-vscode-cline-pack",
+        help="Export a handoff pack for Cline CLI or VS Code Cline from a cluster, Java phase pack, or review JSON.",
+    )
+    export_handoff_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    export_handoff_parser.add_argument("--cluster", help="Generic cluster_id.")
+    export_handoff_parser.add_argument("--stage", choices=["classify", "propose", "verify"], help="Generic stage when --cluster is used.")
+    export_handoff_parser.add_argument("--prompt-json", type=Path, help="Java BFF phase prompt JSON path.")
+    export_handoff_parser.add_argument("--review", type=Path, help="Review JSON path used to create a repair handoff pack.")
+    export_handoff_parser.add_argument("--profile-name", default="company-qwen3-java-phase", help="Company weak-model prompt profile.")
+    export_handoff_parser.add_argument("--output-dir", type=Path, help="Optional output directory for the generated handoff pack.")
+
     context_parser = subparsers.add_parser(
         "compile-context",
         help="Compile a phase-specific context pack for weak 128k-token models.",
@@ -458,6 +499,10 @@ def build_parser() -> argparse.ArgumentParser:
             grade_parser,
             promote_parser,
             rollback_parser,
+            explain_failure_parser,
+            emit_company_prompt_parser,
+            repair_company_prompt_parser,
+            export_handoff_parser,
             context_parser,
             loop_parser,
             resume_parser,
@@ -828,6 +873,62 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
         )
         reporter.success(
             f"Rolled back profile to status={profile.profile_status} with {len(profile.lifecycle_history)} lifecycle event(s)."
+        )
+        return 0
+
+    if args.command == "explain-failure":
+        emit_command_start(reporter, "explain-failure", output=args.output.resolve(), scope=args.scope)
+        payload = explain_failure_from_output_dir(args.output.resolve(), scope=args.scope)
+        reporter.success(
+            f"Generated {payload['index']['count']} failure explanation(s) at {payload['index_json_path']}."
+        )
+        return 0
+
+    if args.command == "emit-company-prompt":
+        emit_command_start(reporter, "emit-company-prompt", analysis_root=args.analysis_root.resolve())
+        if args.cluster and not args.stage:
+            raise ValueError("--stage is required when --cluster is used.")
+        payload = export_vscode_cline_pack(
+            analysis_root=args.analysis_root.resolve(),
+            cluster_id=args.cluster,
+            stage=args.stage,
+            prompt_json=args.prompt_json.resolve() if args.prompt_json else None,
+            output_dir=args.output_dir.resolve() if args.output_dir else None,
+            profile_name=args.profile_name,
+        )
+        reporter.success(
+            f"Generated company prompt pack '{payload['title']}' with {len(payload['written_paths'])} file(s)."
+        )
+        return 0
+
+    if args.command == "repair-company-prompt":
+        emit_command_start(reporter, "repair-company-prompt", review=args.review.resolve())
+        payload = export_vscode_cline_pack(
+            analysis_root=args.analysis_root.resolve(),
+            review_path=args.review.resolve(),
+            output_dir=args.output_dir.resolve() if args.output_dir else None,
+            profile_name=args.profile_name,
+        )
+        reporter.success(
+            f"Generated repair prompt pack '{payload['title']}' with {len(payload['written_paths'])} file(s)."
+        )
+        return 0
+
+    if args.command == "export-vscode-cline-pack":
+        emit_command_start(reporter, "export-vscode-cline-pack", analysis_root=args.analysis_root.resolve())
+        if args.cluster and not args.stage:
+            raise ValueError("--stage is required when --cluster is used.")
+        payload = export_vscode_cline_pack(
+            analysis_root=args.analysis_root.resolve(),
+            cluster_id=args.cluster,
+            stage=args.stage,
+            prompt_json=args.prompt_json.resolve() if args.prompt_json else None,
+            review_path=args.review.resolve() if args.review else None,
+            output_dir=args.output_dir.resolve() if args.output_dir else None,
+            profile_name=args.profile_name,
+        )
+        reporter.success(
+            f"Exported handoff pack '{payload['title']}' with {len(payload['written_paths'])} file(s)."
         )
         return 0
 

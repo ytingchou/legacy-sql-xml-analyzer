@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.15.0 - 2026-03-16
+
+- Added weak-model response normalization for generic and Java BFF reviews, including fenced JSON cleanup, noisy wrapper trimming, Python-literal parsing, Cline JSON event extraction, and saved normalization artifacts.
+- Added `explain-failure` plus `analysis/failure_explanations/*` so stalled loops, rejected reviews, and provider failures now generate actionable troubleshooting cards, recommended commands, and copy-ready company-LLM prompts.
+- Added company-specific prompt-pack and handoff commands: `emit-company-prompt`, `repair-company-prompt`, and `export-vscode-cline-pack`.
+- Added `analysis/handoff/*` packs with `prompt.txt`, `schema.json`, `response_template.json`, operator notes, and pack metadata for Cline CLI or the VS Code Cline extension.
+- Added `analysis/prompt_lab.html` and `analysis/failure_console.html` so operators can browse prompt/context assets and troubleshooting summaries in a browser.
+- Expanded the artifact catalog and README with the new failure-explanation, handoff-pack, normalization, and web-console artifacts.
+- Added tests covering response normalization, failure explanation generation, company prompt rendering, and handoff pack export.
+
 ## 1.11.0 - 2026-03-16
 
 - Added `docs/QUICKSTART_CLINE.md`, a task-focused quick start guide for combining analyzer artifacts with Cline CLI or the VS Code Cline extension.

@@ -17,6 +17,7 @@ from .prompting import (
     resolve_analysis_root,
     sanitize_token,
 )
+from .response_normalizer import normalize_response as normalize_llm_response
 
 
 ALLOWED_CONFIDENCE = {"low": 0.45, "medium": 0.7, "high": 0.9}
@@ -75,6 +76,15 @@ def review_llm_response_from_analysis(
         artifact_descriptor_for_path(review_json_path, "json", f"LLM review ({stage}): {cluster_id}", "prompting"),
         artifact_descriptor_for_path(review_md_path, "markdown", f"LLM review summary ({stage}): {cluster_id}", "prompting"),
     ]
+    normalization_report = review.get("normalization_report")
+    if isinstance(normalization_report, dict):
+        normalization_path = review_root / f"{base_name}-normalization.json"
+        normalization_path.write_text(json.dumps(normalization_report, indent=2, ensure_ascii=False), encoding="utf-8")
+        review["normalization_report_path"] = str(normalization_path.resolve())
+        review_json_path.write_text(json.dumps(review, indent=2, ensure_ascii=False), encoding="utf-8")
+        artifacts.append(
+            artifact_descriptor_for_path(normalization_path, "json", f"LLM normalization ({stage}): {cluster_id}", "prompting")
+        )
 
     next_prompt_text = review.get("next_prompt_text")
     if isinstance(next_prompt_text, str) and next_prompt_text.strip():
@@ -114,16 +124,24 @@ def review_llm_response(
     model: str,
     profile: AnalysisProfile | None = None,
 ) -> dict[str, Any]:
-    normalized_text, normalization_notes = normalize_response_text(raw_text)
+    normalization = normalize_llm_response(raw_text, source="generic-review")
+    normalized_text = normalization.normalized_text
+    normalization_notes = normalization.applied_steps
     issues: list[dict[str, Any]] = []
     parsed_response: dict[str, Any] | None = None
     profile_patch_candidate: dict[str, Any] | None = None
 
-    try:
-        loaded = json.loads(normalized_text)
-    except json.JSONDecodeError as exc:
-        issues.append(issue("INVALID_JSON", "error", f"Response is not valid JSON: {exc.msg}."))
-    else:
+    loaded = normalization.normalized_object
+    if loaded is None:
+        try:
+            loaded = json.loads(normalized_text)
+        except json.JSONDecodeError as exc:
+            issues.append(issue("INVALID_JSON", "error", f"Response is not valid JSON: {exc.msg}."))
+        else:
+            if not isinstance(loaded, dict):
+                issues.append(issue("RESPONSE_NOT_OBJECT", "error", "Response JSON must be a top-level object."))
+                loaded = None
+    if loaded is not None:
         if not isinstance(loaded, dict):
             issues.append(issue("RESPONSE_NOT_OBJECT", "error", "Response JSON must be a top-level object."))
         else:
@@ -183,6 +201,7 @@ def review_llm_response(
         "stage": stage,
         "status": status,
         "normalization_notes": normalization_notes,
+        "normalization_report": normalization.to_dict(),
         "issues": issues,
         "parsed_response": parsed_response,
         "profile_patch_candidate": profile_patch_candidate,
@@ -629,36 +648,8 @@ def render_evidence_request_prompt(cluster: dict[str, Any], response: dict[str, 
 
 
 def normalize_response_text(raw_text: str) -> tuple[str, list[str]]:
-    normalized = raw_text.strip()
-    notes: list[str] = []
-
-    if normalized.startswith("```"):
-        lines = normalized.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-            notes.append("removed_opening_code_fence")
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-            notes.append("removed_closing_code_fence")
-        normalized = "\n".join(lines).strip()
-
-    try:
-        json.loads(normalized)
-        return normalized, notes
-    except json.JSONDecodeError:
-        pass
-
-    start = normalized.find("{")
-    end = normalized.rfind("}")
-    if start != -1 and end > start:
-        candidate = normalized[start : end + 1].strip()
-        try:
-            json.loads(candidate)
-        except json.JSONDecodeError:
-            return normalized, notes
-        notes.append("trimmed_outer_text")
-        return candidate, notes
-    return normalized, notes
+    normalization = normalize_llm_response(raw_text, source="generic-review")
+    return normalization.normalized_text, normalization.applied_steps
 
 
 def required_fields_for_stage(stage: str) -> list[str]:

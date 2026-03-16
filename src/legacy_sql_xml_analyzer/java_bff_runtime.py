@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .analyzer import append_artifacts_to_index
-from .evolution import issue, normalize_response_text
+from .evolution import issue
 from .java_bff import (
     bundle_phase_root_for,
     bundle_root_for,
@@ -30,6 +30,7 @@ from .llm_provider import (
     resolve_provider_config,
 )
 from .models import ArtifactDescriptor
+from .response_normalizer import normalize_response as normalize_llm_response
 
 
 JAVA_BFF_ALLOWED_PHASES = {
@@ -274,6 +275,15 @@ def review_java_bff_response_from_analysis(
         artifact_descriptor_for_path(review_json_path, "json", f"Java BFF review: {phase_pack_path.stem}", "java_bff"),
         artifact_descriptor_for_path(review_md_path, "markdown", f"Java BFF review summary: {phase_pack_path.stem}", "java_bff"),
     ]
+    normalization_report = review.get("normalization_report")
+    if isinstance(normalization_report, dict):
+        normalization_path = review_root / f"{safe_name(phase_pack_path.stem)}-normalization.json"
+        normalization_path.write_text(json.dumps(normalization_report, indent=2, ensure_ascii=False), encoding="utf-8")
+        review["normalization_report_path"] = str(normalization_path.resolve())
+        review_json_path.write_text(json.dumps(review, indent=2, ensure_ascii=False), encoding="utf-8")
+        artifacts.append(
+            artifact_descriptor_for_path(normalization_path, "json", f"Java BFF normalization: {phase_pack_path.stem}", "java_bff")
+        )
     repair_prompt = review.get("repair_prompt_text")
     if isinstance(repair_prompt, str) and repair_prompt.strip():
         repair_path = review_root / f"{safe_name(phase_pack_path.stem)}-repair.txt"
@@ -296,7 +306,9 @@ def review_java_bff_response(
     phase_pack_path: Path,
     validation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized_text, normalization_notes = normalize_response_text(raw_text)
+    normalization = normalize_llm_response(raw_text, source="java-bff-review")
+    normalized_text = normalization.normalized_text
+    normalization_notes = normalization.applied_steps
     issues: list[dict[str, Any]] = []
     parsed_response: dict[str, Any] | None = None
     schema = phase_payload.get("answer_schema", {})
@@ -304,11 +316,17 @@ def review_java_bff_response(
     if phase not in JAVA_BFF_ALLOWED_PHASES:
         raise ValueError(f"Unsupported Java BFF phase: {phase}")
 
-    try:
-        loaded = json.loads(normalized_text)
-    except json.JSONDecodeError as exc:
-        issues.append(issue("INVALID_JSON", "error", f"Response is not valid JSON: {exc.msg}."))
-    else:
+    loaded = normalization.normalized_object
+    if loaded is None:
+        try:
+            loaded = json.loads(normalized_text)
+        except json.JSONDecodeError as exc:
+            issues.append(issue("INVALID_JSON", "error", f"Response is not valid JSON: {exc.msg}."))
+        else:
+            if not isinstance(loaded, dict):
+                issues.append(issue("RESPONSE_NOT_OBJECT", "error", "Response JSON must be a top-level object."))
+                loaded = None
+    if loaded is not None:
         if not isinstance(loaded, dict):
             issues.append(issue("RESPONSE_NOT_OBJECT", "error", "Response JSON must be a top-level object."))
         else:
@@ -336,6 +354,7 @@ def review_java_bff_response(
         "phase_pack_path": str(phase_pack_path.resolve()),
         "status": status,
         "normalization_notes": normalization_notes,
+        "normalization_report": normalization.to_dict(),
         "issues": issues,
         "parsed_response": parsed_response,
         "next_phase_pack_path": next_phase_pack_path,
@@ -803,6 +822,10 @@ def render_java_bff_review_markdown(review: dict[str, Any]) -> str:
             lines.append(f"- `{item['code']}` {item['severity']}: {item['message']}")
     else:
         lines.append("- None")
+    if review.get("normalization_notes"):
+        lines.extend(["", "## Normalization"])
+        for item in review["normalization_notes"]:
+            lines.append(f"- `{item}`")
     if review.get("next_phase_pack_path"):
         lines.extend(["", "## Next Phase", f"- `{review['next_phase_pack_path']}`"])
     return "\n".join(lines).rstrip() + "\n"

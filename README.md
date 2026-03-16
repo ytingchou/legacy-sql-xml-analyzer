@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.11.0`
+Current local release: `v1.15.0`
 
 Quick start guides:
 
@@ -14,6 +14,31 @@ Most CLI commands also support:
 
 - `--verbose`: print extra debug detail and traceback information on failure
 - `--no-progress`: suppress live progress lines when you want quieter logs
+
+## Company Cline Workflow
+
+For company environments using `Cline CLI` or the VS Code Cline extension with a weaker `Qwen3`-class model and a practical `128k` token ceiling, the fastest stable workflow is:
+
+1. Generate scoped artifacts with `prepare-java-bff` or `compile-context` / `compile-java-bff-context`.
+2. Export a copy-ready handoff pack with `emit-company-prompt`, `repair-company-prompt`, or `export-vscode-cline-pack`.
+3. Feed only the generated `prompt.txt` to Cline, not the full `analysis/` tree.
+4. Review the response with `review-llm-response` or `review-java-bff-response`.
+5. If a loop stalls, run `explain-failure` and use the generated repair prompt or recommended command.
+
+Useful commands:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer explain-failure --output ./analysis-output
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer emit-company-prompt --analysis-root ./analysis-output --cluster reference_target_missing --stage propose
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer export-vscode-cline-pack --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
+```
+
+New operator-facing artifacts:
+
+- `analysis/failure_explanations/*`: actionable failure cards with recommended next commands and copy-ready company-LLM prompts
+- `analysis/handoff/*`: copy-ready packs for Cline CLI or VS Code Cline, including `prompt.txt`, `schema.json`, and `response_template.json`
+- `analysis/prompt_lab.html`: web view for prompt/context packs and token budgets
+- `analysis/failure_console.html`: web view for failure explanations and troubleshooting
 
 ## Usage
 
@@ -74,12 +99,19 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/prompt_scoreboard.csv`: spreadsheet-ready provider/stage prompt scoreboard
 - `analysis/schema/artifact_catalog.json`: stable machine-readable artifact contract catalog
 - `analysis/schema/artifact_catalog.md`: human-readable artifact contract catalog
+- `analysis/prompt_lab.html`: static prompt lab for context packs, handoff bundles, and token budgets
+- `analysis/failure_console.html`: static failure console for troubleshooting weak-model, bridge, and provider issues
+- `analysis/failure_explanations/index.json`: aggregated actionable failure explanations
+- `analysis/failure_explanations/*.md`: per-failure troubleshooting cards with recommended commands and company-LLM prompts
+- `analysis/handoff/*/pack.json`: Cline / VS Code handoff pack metadata
+- `analysis/handoff/*/prompt.txt`: copy-ready prompt for company weak models
 - `analysis/failure_clusters.json`: grouped diagnostic families for repeated issues
 - `analysis/failure_clusters.md`: human-readable failure family summary
 - `analysis/prompt_packs/*.txt`: staged weak-LLM prompt packs (`classify`, `propose`, `verify`) plus a backward-compatible propose alias
 - `analysis/prompt_packs/*.json`: prompt metadata, stage schemas, and bundle metadata
 - `analysis/llm_reviews/*.json`: reviewed weak-LLM responses, patch candidates, and follow-up prompt metadata
 - `analysis/llm_reviews/*.md`: human-readable review summaries for weak-LLM responses
+- `analysis/llm_reviews/*-normalization.json`: normalization reports for salvaged weak-model responses
 - `analysis/llm_runs/*/request.json`: sanitized OpenAI-compatible request payloads
 - `analysis/llm_runs/*/response.json`: raw provider responses
 - `analysis/llm_runs/*/response.txt`: extracted assistant text responses
@@ -332,6 +364,7 @@ The Java BFF loop adds:
 - `analysis/java_bff/merged/*/implementation_plan.json`: merged repository, BFF, and verification logic
 - `analysis/java_bff/skeletons/*/manifest.json`: emitted Java file manifest
 - `analysis/java_bff/skeletons/*/README.md`: handoff readme for the generated skeleton bundle
+- `analysis/java_bff/reviews/*/*-normalization.json`: normalization reports for Java BFF phase responses after repairing weak-model output
 - `analysis/java_bff/loop/loop_state.json`: resumable loop state
 - `analysis/java_bff/loop/completion_report.json`: final status with missing artifact tracking
 
