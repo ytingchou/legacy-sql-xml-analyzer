@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.0 - 2026-03-16
+
+- Added `docs/QUICKSTART_CLINE.md`, a task-focused quick start guide for combining analyzer artifacts with Cline CLI or the VS Code Cline extension.
+- Added a top-level README quick start entry so the Cline-oriented workflow is easier to discover.
+- Documented the fastest Java BFF and generic analyzer paths for weak 128k-token models such as Qwen3, including when to use the automatic bridge loop versus manual phase/context review.
+
 ## 1.10.0 - 2026-03-16
 
 - Added a reusable `tools/cline_bridge.py` wrapper plus `src/legacy_sql_xml_analyzer/cline_bridge.py` so generic analyzer loops and Java BFF loops can hand off phase tasks to the installed Cline CLI through a stable file-based contract.

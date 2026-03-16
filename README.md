@@ -4,7 +4,11 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.9.1`
+Current local release: `v1.11.0`
+
+Quick start guides:
+
+- [Cline CLI / VS Code Cline Quick Start](./docs/QUICKSTART_CLINE.md)
 
 Most CLI commands also support:
 
