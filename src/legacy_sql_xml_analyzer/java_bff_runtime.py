@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from .java_bff import (
     resolve_java_bff_root,
     safe_name,
 )
+from .java_bff_context import compile_java_bff_context_pack, context_pack_paths, write_java_bff_context_pack
 from .llm_provider import (
     build_request_artifact,
     extract_response_text,
@@ -37,6 +39,92 @@ JAVA_BFF_ALLOWED_PHASES = {
     "phase-3-bff-assembly",
     "phase-4-verify",
 }
+JAVA_IDENTIFIER_RE = r"^[a-z][A-Za-z0-9]*$"
+JAVA_LAYER_LEAK_TERMS = {
+    "phase-2-repository-chunk": ["controller", "service", "restcontroller", "requestmapping"],
+    "phase-2-repository-merge": ["controller", "service", "restcontroller", "requestmapping"],
+    "phase-3-bff-assembly": ["mapsqlparametersource", "namedparameterjdbctemplate", "rowmapper", "queryforlist", "jdbc"],
+}
+JAVA_FORBIDDEN_TERMS = [
+    "hibernate",
+    "entitymanager",
+    "jpa",
+]
+
+
+def ensure_java_bff_context_artifacts(
+    analysis_root: Path,
+    phase_pack_path: Path,
+    prompt_profile: str | None = None,
+) -> tuple[dict[str, Any], list[Path], list[ArtifactDescriptor]]:
+    pack = compile_java_bff_context_pack(
+        analysis_root=analysis_root,
+        phase_pack_path=phase_pack_path,
+        prompt_profile=prompt_profile,
+    )
+    paths = write_java_bff_context_pack(analysis_root, pack)
+    artifacts = [
+        artifact_descriptor_for_path(paths[0], "json", f"Java BFF context pack: {phase_pack_path.stem}", "java_bff"),
+        artifact_descriptor_for_path(paths[1], "text", f"Java BFF context prompt: {phase_pack_path.stem}", "java_bff"),
+        artifact_descriptor_for_path(paths[2], "markdown", f"Java BFF context summary: {phase_pack_path.stem}", "java_bff"),
+    ]
+    append_artifacts_to_index(resolve_java_bff_root(analysis_root).parent.parent, artifacts)
+    return pack, paths, artifacts
+
+
+def build_java_bff_validation_context(
+    analysis_root: Path,
+    phase_payload: dict[str, Any],
+    phase_pack_path: Path,
+) -> dict[str, Any]:
+    java_root = resolve_java_bff_root(analysis_root)
+    bundle_id = str(phase_payload["bundle_id"])
+    bundle_payload = load_bundle_payload(analysis_root, bundle_id)
+    bundle_queries = {
+        str(item.get("query_id") or ""): item
+        for item in bundle_payload.get("queries", [])
+        if isinstance(item, dict)
+    }
+    query_id = phase_query_id_from_payload(phase_payload)
+    query_payload = bundle_queries.get(query_id or "")
+    card_payload = None
+    if query_payload:
+        card_path = Path(str(query_payload.get("card_json_path") or ""))
+        if card_path.exists():
+            loaded = json.loads(card_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                card_payload = loaded
+
+    chunk_payload = None
+    chunk_id = phase_chunk_id_from_payload(phase_payload)
+    if chunk_id:
+        chunk_path = java_root / "sql_chunks" / f"{safe_name(chunk_id)}.json"
+        if chunk_path.exists():
+            loaded = json.loads(chunk_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                chunk_payload = loaded
+
+    plan_review = load_latest_review(java_root, bundle_id, "phase-1-plan")
+    assembly_review = load_latest_review(java_root, bundle_id, "phase-3-bff-assembly")
+    merge_reviews = {
+        query_key: load_latest_review(java_root, bundle_id, "phase-2-repository-merge", query_id=query_key)
+        for query_key in bundle_queries
+    }
+    accepted_chunk_reviews = load_reviews_for_phase(java_root, bundle_id, "phase-2-repository-chunk", query_id=query_id)
+    return {
+        "bundle_payload": bundle_payload,
+        "bundle_query_ids": [item for item in bundle_queries if item],
+        "phase_pack_path": str(phase_pack_path.resolve()),
+        "query_id": query_id,
+        "chunk_id": chunk_id,
+        "query_payload": query_payload,
+        "card_payload": card_payload,
+        "chunk_payload": chunk_payload,
+        "accepted_plan_review": plan_review,
+        "accepted_chunk_reviews": accepted_chunk_reviews,
+        "accepted_merge_reviews": merge_reviews,
+        "accepted_assembly_review": assembly_review,
+    }
 
 
 def invoke_java_bff_phase_pack(
@@ -55,6 +143,11 @@ def invoke_java_bff_phase_pack(
 ) -> dict[str, Any]:
     java_root = resolve_java_bff_root(analysis_root)
     phase_payload = load_phase_pack_payload(phase_pack_path)
+    context_pack, context_paths, context_artifacts = ensure_java_bff_context_artifacts(
+        analysis_root=analysis_root,
+        phase_pack_path=phase_pack_path,
+        prompt_profile=str(phase_payload.get("prompt_profile") or "qwen3-128k-java-bff"),
+    )
     config = resolve_provider_config(
         provider_config_path=provider_config_path,
         provider_base_url=provider_base_url,
@@ -66,7 +159,7 @@ def invoke_java_bff_phase_pack(
         temperature=temperature,
         timeout_seconds=timeout_seconds,
     )
-    prompt_text = str(phase_payload["prompt_text"])
+    prompt_text = str(context_pack["prompt_text"])
     response_payload = post_chat_completion(config=config, prompt_text=prompt_text)
     response_text = extract_response_text(response_payload)
 
@@ -94,12 +187,15 @@ def invoke_java_bff_phase_pack(
         "phase_pack_path": str(phase_pack_path.resolve()),
         "prompt_path": str(phase_pack_path.resolve()),
         "prompt_profile": phase_payload["prompt_profile"],
+        "context_pack_path": str(context_paths[0].resolve()),
+        "context_pack_text_path": str(context_paths[1].resolve()),
+        "context_missing_inputs": context_pack["missing_inputs"],
         "provider_name": config.provider_name or config.model,
         "provider_model": config.model,
         "provider_base_url": config.base_url,
         "token_limit": config.token_limit,
         "temperature": config.temperature,
-        "prompt_estimated_tokens": estimate_tokens(prompt_text),
+        "prompt_estimated_tokens": int(context_pack["estimated_prompt_tokens"]),
         "prompt_sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
         "response_usage": response_payload.get("usage", {}),
         "review_enabled": review,
@@ -112,6 +208,7 @@ def invoke_java_bff_phase_pack(
     summary_md_path.write_text(render_run_summary_markdown(run_summary), encoding="utf-8")
 
     artifacts = [
+        *context_artifacts,
         artifact_descriptor_for_path(request_path, "json", f"Java BFF LLM request: {phase_pack_path.stem}", "java_bff"),
         artifact_descriptor_for_path(response_json_path, "json", f"Java BFF LLM response JSON: {phase_pack_path.stem}", "java_bff"),
         artifact_descriptor_for_path(response_text_path, "text", f"Java BFF LLM response text: {phase_pack_path.stem}", "java_bff"),
@@ -154,7 +251,14 @@ def review_java_bff_response_from_analysis(
     phase_payload = load_phase_pack_payload(phase_pack_path)
     bundle_id = str(phase_payload["bundle_id"])
     raw_text = response_path.read_text(encoding="utf-8")
-    review = review_java_bff_response(phase_payload, raw_text, bundle_id=bundle_id, phase_pack_path=phase_pack_path)
+    validation_context = build_java_bff_validation_context(analysis_root, phase_payload, phase_pack_path)
+    review = review_java_bff_response(
+        phase_payload,
+        raw_text,
+        bundle_id=bundle_id,
+        phase_pack_path=phase_pack_path,
+        validation_context=validation_context,
+    )
 
     review_root = java_root / "reviews" / bundle_slug(bundle_id)
     review_root.mkdir(parents=True, exist_ok=True)
@@ -190,6 +294,7 @@ def review_java_bff_response(
     raw_text: str,
     bundle_id: str,
     phase_pack_path: Path,
+    validation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_text, normalization_notes = normalize_response_text(raw_text)
     issues: list[dict[str, Any]] = []
@@ -209,7 +314,7 @@ def review_java_bff_response(
         else:
             parsed_response = loaded
             issues.extend(validate_against_schema(schema, parsed_response))
-            issues.extend(validate_java_bff_response(phase_payload, parsed_response))
+            issues.extend(validate_java_bff_response(phase_payload, parsed_response, validation_context=validation_context))
 
     has_errors = any(item["severity"] == "error" for item in issues)
     status = "needs_revision" if has_errors else "accepted"
@@ -371,14 +476,245 @@ def find_next_phase_pack_path(current_phase_pack_path: Path, bundle_id: str) -> 
     return sequence[index + 1]
 
 
-def validate_java_bff_response(phase_payload: dict[str, Any], response: dict[str, Any]) -> list[dict[str, Any]]:
+def validate_java_bff_response(
+    phase_payload: dict[str, Any],
+    response: dict[str, Any],
+    validation_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     bundle_id = str(phase_payload.get("bundle_id") or "")
+    phase = str(phase_payload.get("phase") or "")
     if "entry_query_id" in response and response["entry_query_id"] != bundle_id:
         issues.append(issue("ENTRY_QUERY_ID_MISMATCH", "error", "entry_query_id does not match the bundle id.", field="entry_query_id"))
     if "bundle_id" in response and response["bundle_id"] != bundle_id:
         issues.append(issue("BUNDLE_ID_MISMATCH", "error", "bundle_id does not match the phase pack bundle.", field="bundle_id"))
+    issues.extend(validate_forbidden_terms(response))
+    issues.extend(validate_phase_specific_java_output(phase, response, validation_context or {}))
     return issues
+
+
+def validate_phase_specific_java_output(
+    phase: str,
+    response: dict[str, Any],
+    validation_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if phase == "phase-1-plan":
+        return validate_plan_output(response, validation_context)
+    if phase == "phase-2-repository-chunk":
+        return validate_repository_chunk_output(response, validation_context)
+    if phase == "phase-2-repository-merge":
+        return validate_repository_merge_output(response, validation_context)
+    if phase == "phase-3-bff-assembly":
+        return validate_assembly_output(response, validation_context)
+    if phase == "phase-4-verify":
+        return validate_verify_output(response, validation_context)
+    return []
+
+
+def validate_plan_output(response: dict[str, Any], validation_context: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    bundle_query_ids = set(validation_context.get("bundle_query_ids", []))
+    seen_methods: set[str] = set()
+    methods = response.get("repository_methods", [])
+    if not isinstance(methods, list) or not methods:
+        issues.append(issue("JAVA_PLAN_NO_METHODS", "error", "repository_methods must contain at least one method.", field="repository_methods"))
+        return issues
+    for index, item in enumerate(methods):
+        if not isinstance(item, dict):
+            continue
+        query_id = str(item.get("query_id") or "")
+        method_name = str(item.get("method_name") or "")
+        if query_id not in bundle_query_ids:
+            issues.append(issue("JAVA_UNKNOWN_QUERY_ID", "error", f"repository_methods[{index}].query_id is not part of the bundle.", field=f"repository_methods[{index}].query_id"))
+        if not re.match(JAVA_IDENTIFIER_RE, method_name):
+            issues.append(issue("JAVA_METHOD_NAME_INVALID", "error", f"repository_methods[{index}].method_name is not a Java-style identifier.", field=f"repository_methods[{index}].method_name"))
+        if method_name in seen_methods:
+            issues.append(issue("JAVA_DUPLICATE_METHOD_NAME", "error", f"repository_methods[{index}].method_name is duplicated.", field=f"repository_methods[{index}].method_name"))
+        seen_methods.add(method_name)
+    return issues
+
+
+def validate_repository_chunk_output(response: dict[str, Any], validation_context: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    expected_query_id = validation_context.get("query_id")
+    expected_chunk_id = validation_context.get("chunk_id")
+    if expected_query_id and response.get("query_id") != expected_query_id:
+        issues.append(issue("JAVA_QUERY_ID_MISMATCH", "error", "query_id does not match the expected repository chunk query.", field="query_id"))
+    if expected_chunk_id and response.get("chunk_id") != expected_chunk_id:
+        issues.append(issue("JAVA_CHUNK_ID_MISMATCH", "error", "chunk_id does not match the expected SQL chunk.", field="chunk_id"))
+    expected_method_name = (
+        validation_context.get("card_payload", {})
+        .get("java_bff_logic", {})
+        .get("method_name")
+    )
+    if expected_method_name and response.get("method_name") != expected_method_name:
+        issues.append(issue("JAVA_METHOD_NAME_MISMATCH", "error", "method_name does not match the recommended repository method.", field="method_name"))
+    parameter_names = {
+        str(item.get("parameter_name") or "")
+        for item in validation_context.get("card_payload", {}).get("parameters", [])
+        if isinstance(item, dict)
+    }
+    bindings = response.get("parameter_binding", [])
+    if parameter_names and isinstance(bindings, list):
+        seen_bindings = set()
+        for index, item in enumerate(bindings):
+            if not isinstance(item, dict):
+                continue
+            parameter_name = str(item.get("parameter_name") or "")
+            java_name = str(item.get("java_argument_name") or "")
+            seen_bindings.add(parameter_name)
+            if parameter_name not in parameter_names:
+                issues.append(issue("JAVA_UNKNOWN_PARAMETER_BINDING", "error", f"parameter_binding[{index}] references an unknown SQL parameter.", field=f"parameter_binding[{index}].parameter_name"))
+            if java_name and not re.match(JAVA_IDENTIFIER_RE, java_name):
+                issues.append(issue("JAVA_ARGUMENT_NAME_INVALID", "error", f"parameter_binding[{index}].java_argument_name is not a Java-style identifier.", field=f"parameter_binding[{index}].java_argument_name"))
+        if parameter_names and not seen_bindings:
+            issues.append(issue("JAVA_PARAMETER_BINDING_EMPTY", "error", "parameter_binding is empty even though the SQL chunk exposes parameters.", field="parameter_binding"))
+    issues.extend(validate_layer_terms(response, "phase-2-repository-chunk"))
+    issues.extend(validate_sql_rewrite_terms(response, ["sql_logic_steps", "carry_forward_context"]))
+    return issues
+
+
+def validate_repository_merge_output(response: dict[str, Any], validation_context: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    expected_query_id = validation_context.get("query_id")
+    expected_method_name = (
+        validation_context.get("card_payload", {})
+        .get("java_bff_logic", {})
+        .get("method_name")
+    )
+    if expected_query_id and response.get("query_id") != expected_query_id:
+        issues.append(issue("JAVA_QUERY_ID_MISMATCH", "error", "query_id does not match the expected repository merge query.", field="query_id"))
+    if expected_method_name and response.get("method_name") != expected_method_name:
+        issues.append(issue("JAVA_METHOD_NAME_MISMATCH", "error", "method_name does not match the recommended repository method.", field="method_name"))
+    expected_chunk_ids = [
+        str(item.get("parsed_response", {}).get("chunk_id") or "")
+        for item in validation_context.get("accepted_chunk_reviews", [])
+        if isinstance(item, dict)
+    ]
+    returned_chunk_ids = [str(item) for item in response.get("sql_chunk_order", []) if isinstance(item, str)]
+    if expected_chunk_ids and returned_chunk_ids != expected_chunk_ids:
+        issues.append(issue("JAVA_SQL_CHUNK_ORDER_MISMATCH", "error", "sql_chunk_order does not match the accepted repository chunk outputs.", field="sql_chunk_order"))
+    if not validation_context.get("accepted_chunk_reviews"):
+        issues.append(issue("JAVA_MERGE_INPUTS_MISSING", "error", "Accepted repository chunk outputs are missing for this query.", field="sql_chunk_order"))
+    issues.extend(validate_layer_terms(response, "phase-2-repository-merge"))
+    issues.extend(validate_sql_rewrite_terms(response, ["repository_logic", "parameter_contract"]))
+    return issues
+
+
+def validate_assembly_output(response: dict[str, Any], validation_context: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    if not validation_context.get("accepted_plan_review"):
+        issues.append(issue("JAVA_ASSEMBLY_PLAN_MISSING", "error", "Accepted phase-1 plan output is missing.", field="service_logic"))
+    missing_merges = [
+        query_id
+        for query_id, review in validation_context.get("accepted_merge_reviews", {}).items()
+        if not review
+    ]
+    if missing_merges:
+        issues.append(issue("JAVA_ASSEMBLY_REPOSITORY_MERGES_MISSING", "error", f"Accepted repository merge outputs are missing for: {', '.join(missing_merges)}.", field="service_logic"))
+    dto_hints = response.get("dto_contract_hints", [])
+    if not isinstance(dto_hints, list) or not dto_hints:
+        issues.append(issue("JAVA_DTO_HINTS_EMPTY", "warning", "dto_contract_hints is empty; the BFF DTO contract is likely underspecified.", field="dto_contract_hints"))
+    issues.extend(validate_layer_terms(response, "phase-3-bff-assembly"))
+    issues.extend(validate_sql_rewrite_terms(response, ["service_logic", "controller_logic"]))
+    return issues
+
+
+def validate_verify_output(response: dict[str, Any], validation_context: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    verdict = str(response.get("verdict") or "")
+    token_budget = response.get("token_budget_check", {})
+    missing_artifacts = response.get("missing_artifacts", [])
+    guess_risks = response.get("guess_risks", [])
+    if verdict == "ready":
+        if isinstance(token_budget, dict) and not bool(token_budget.get("within_limit")):
+            issues.append(issue("JAVA_VERIFY_READY_OVER_BUDGET", "error", "verdict is ready even though token_budget_check.within_limit is false.", field="token_budget_check.within_limit"))
+        if isinstance(missing_artifacts, list) and missing_artifacts:
+            issues.append(issue("JAVA_VERIFY_READY_WITH_MISSING_ARTIFACTS", "error", "verdict is ready even though missing_artifacts is not empty.", field="missing_artifacts"))
+        if isinstance(guess_risks, list) and guess_risks:
+            issues.append(issue("JAVA_VERIFY_READY_WITH_GUESS_RISKS", "error", "verdict is ready even though guess_risks is not empty.", field="guess_risks"))
+    if not validation_context.get("accepted_assembly_review"):
+        issues.append(issue("JAVA_VERIFY_ASSEMBLY_MISSING", "error", "Accepted phase-3 assembly output is missing.", field="missing_artifacts"))
+    return issues
+
+
+def validate_layer_terms(response: dict[str, Any], phase: str) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    lowered = json.dumps(response, ensure_ascii=False).lower()
+    for term in JAVA_LAYER_LEAK_TERMS.get(phase, []):
+        if term in lowered:
+            issues.append(issue("JAVA_LAYER_LEAK", "error", f"The response includes `{term}`, which belongs to the wrong implementation layer for {phase}."))
+    return issues
+
+
+def validate_forbidden_terms(response: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    lowered = json.dumps(response, ensure_ascii=False).lower()
+    for term in JAVA_FORBIDDEN_TERMS:
+        if term in lowered:
+            issues.append(issue("JAVA_FORBIDDEN_TERM", "error", f"The response includes forbidden implementation drift term `{term}`."))
+    return issues
+
+
+def validate_sql_rewrite_terms(response: dict[str, Any], fields: list[str]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for field in fields:
+        values = response.get(field)
+        if not isinstance(values, list):
+            continue
+        for index, item in enumerate(values):
+            text = str(item).lower()
+            if "rewrite" in text and "sql" in text:
+                issues.append(issue("JAVA_SQL_REWRITE_RISK", "error", f"{field}[{index}] suggests rewriting SQL instead of preserving the analyzed Oracle 19c query.", field=f"{field}[{index}]"))
+            if "add join" in text or "new table" in text:
+                issues.append(issue("JAVA_SQL_SHAPE_DRIFT", "error", f"{field}[{index}] suggests changing the SQL shape beyond the analyzed artifacts.", field=f"{field}[{index}]"))
+    return issues
+
+
+def phase_query_id_from_payload(phase_payload: dict[str, Any]) -> str | None:
+    schema = phase_payload.get("answer_schema", {})
+    if not isinstance(schema, dict):
+        return None
+    value = schema.get("query_id")
+    if isinstance(value, str) and value.strip() and value.strip().lower() != "string":
+        return value
+    return None
+
+
+def phase_chunk_id_from_payload(phase_payload: dict[str, Any]) -> str | None:
+    schema = phase_payload.get("answer_schema", {})
+    if not isinstance(schema, dict):
+        return None
+    value = schema.get("chunk_id")
+    if isinstance(value, str) and value.strip() and value.strip().lower() != "string":
+        return value
+    return None
+
+
+def load_latest_review(java_root: Path, bundle_id: str, phase: str, query_id: str | None = None) -> dict[str, Any] | None:
+    reviews = load_reviews_for_phase(java_root, bundle_id, phase, query_id=query_id)
+    return reviews[-1] if reviews else None
+
+
+def load_reviews_for_phase(java_root: Path, bundle_id: str, phase: str, query_id: str | None = None) -> list[dict[str, Any]]:
+    review_root = java_root / "reviews" / bundle_slug(bundle_id)
+    if not review_root.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in sorted(review_root.glob("*-review.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("status") not in {"accepted", "insufficient_evidence"}:
+            continue
+        if payload.get("phase") != phase:
+            continue
+        parsed = payload.get("parsed_response")
+        if query_id and isinstance(parsed, dict) and str(parsed.get("query_id") or "") != query_id:
+            continue
+        payload["__path"] = str(path.resolve())
+        rows.append(payload)
+    return rows
 
 
 def validate_against_schema(schema: Any, payload: Any, path: str = "") -> list[dict[str, Any]]:
@@ -511,6 +847,20 @@ def append_java_bff_run_index(run_root: Path, summary_path: Path, run_summary: d
     index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def append_java_bff_task_index(tasks_root: Path, task_payload: dict[str, Any]) -> None:
+    tasks_root.mkdir(parents=True, exist_ok=True)
+    index_path = tasks_root / "index.json"
+    payload = {"tasks": []}
+    if index_path.exists():
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {"tasks": []}
+    payload.setdefault("tasks", [])
+    payload["tasks"].append(task_payload)
+    index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def artifact_descriptor_for_path(path: Path, kind: str, title: str, scope: str) -> ArtifactDescriptor:
     content = path.read_text(encoding="utf-8")
     estimated = estimate_tokens(content)
@@ -544,33 +894,60 @@ class JavaBffClineBridgeRunner:
 
     def run_phase_pack(self, analysis_root: Path, phase_pack_path: Path) -> dict[str, Any]:
         phase_payload = load_phase_pack_payload(phase_pack_path)
+        context_pack, context_paths, context_artifacts = ensure_java_bff_context_artifacts(
+            analysis_root=analysis_root,
+            phase_pack_path=phase_pack_path,
+            prompt_profile=str(phase_payload.get("prompt_profile") or "qwen3-128k-java-bff"),
+        )
         bundle_id = str(phase_payload["bundle_id"])
         java_root = resolve_java_bff_root(analysis_root)
         tasks_root = java_root / "tasks" / bundle_slug(bundle_id)
         tasks_root.mkdir(parents=True, exist_ok=True)
         task_path = tasks_root / f"{safe_name(phase_pack_path.stem)}.json"
+        result_path = java_root / "agent_runs" / bundle_slug(bundle_id) / f"{safe_name(phase_pack_path.stem)}.result.json"
         task_payload = {
+            "task_contract_version": "java-bff-task-v1",
+            "task_id": f"{bundle_slug(bundle_id)}:{phase_payload['phase']}:{safe_name(phase_pack_path.stem)}",
+            "runner_mode": "cline_bridge",
+            "bundle_id": bundle_id,
+            "phase": phase_payload["phase"],
             "phase_pack_path": str(phase_pack_path.resolve()),
-            "phase_payload": phase_payload,
+            "context_pack_path": str(context_paths[0].resolve()),
+            "context_prompt_path": str(context_paths[1].resolve()),
+            "expected_schema": phase_payload.get("answer_schema", {}),
+            "token_budget": context_pack["budget"],
+            "missing_inputs": context_pack["missing_inputs"],
+            "recommended_result_path": str(result_path.resolve()),
         }
         task_path.write_text(json.dumps(task_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        append_java_bff_task_index(java_root / "tasks", task_payload)
         if self.cline_bridge_command:
             subprocess.run(self.cline_bridge_command, shell=True, check=True, cwd=str(analysis_root.parent))
-        result_path = java_root / "agent_runs" / bundle_slug(bundle_id) / f"{safe_name(phase_pack_path.stem)}.result.json"
         if not result_path.exists():
             raise FileNotFoundError(f"Cline bridge did not write Java BFF result file {result_path}.")
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         response_text_path = Path(str(payload["response_text_path"]))
+        task_artifacts = [
+            *context_artifacts,
+            artifact_descriptor_for_path(task_path, "json", f"Java BFF bridge task: {phase_pack_path.stem}", "java_bff"),
+            artifact_descriptor_for_path(result_path, "json", f"Java BFF bridge result: {phase_pack_path.stem}", "java_bff"),
+        ]
+        append_artifacts_to_index(java_root.parent.parent, task_artifacts)
         return {
             "run_summary": {
                 "bundle_id": bundle_id,
                 "phase": phase_payload["phase"],
                 "phase_pack_path": str(phase_pack_path.resolve()),
+                "task_path": str(task_path.resolve()),
+                "context_pack_path": str(context_paths[0].resolve()),
             },
             "response_text": response_text_path.read_text(encoding="utf-8"),
             "response_text_path": str(response_text_path.resolve()),
             "response_payload": payload,
-            "artifacts": [artifact_descriptor_for_path(result_path, "json", f"Java BFF bridge result: {phase_pack_path.stem}", "java_bff")],
+            "result_path": str(result_path.resolve()),
+            "task_path": str(task_path.resolve()),
+            "context_pack_path": str(context_paths[0].resolve()),
+            "artifacts": task_artifacts,
         }
 
 
@@ -582,6 +959,11 @@ class JavaBffFakeRunner:
     def run_phase_pack(self, analysis_root: Path, phase_pack_path: Path) -> dict[str, Any]:
         key = str(phase_pack_path.resolve())
         phase_payload = load_phase_pack_payload(phase_pack_path)
+        context_pack, context_paths, context_artifacts = ensure_java_bff_context_artifacts(
+            analysis_root=analysis_root,
+            phase_pack_path=phase_pack_path,
+            prompt_profile=str(phase_payload.get("prompt_profile") or "qwen3-128k-java-bff"),
+        )
         response = self.responses.get(key)
         if response is None:
             response = self.responses.get(str(phase_pack_path))
@@ -608,14 +990,22 @@ class JavaBffFakeRunner:
             "bundle_id": bundle_id,
             "phase": phase_payload["phase"],
             "phase_pack_path": str(phase_pack_path.resolve()),
+            "context_pack_path": str(context_paths[0].resolve()),
             "response_text_path": str(response_text_path.resolve()),
         }
         result_path = run_root / f"{safe_name(phase_pack_path.stem)}.result.json"
         result_path.write_text(json.dumps(result_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        artifacts = [
+            *context_artifacts,
+            artifact_descriptor_for_path(result_path, "json", f"Java BFF fake result: {phase_pack_path.stem}", "java_bff"),
+        ]
+        append_artifacts_to_index(java_root.parent.parent, artifacts)
         return {
             "run_summary": result_payload,
             "response_text": text,
             "response_text_path": str(response_text_path.resolve()),
             "response_payload": result_payload,
-            "artifacts": [artifact_descriptor_for_path(result_path, "json", f"Java BFF fake result: {phase_pack_path.stem}", "java_bff")],
+            "result_path": str(result_path.resolve()),
+            "context_pack_path": str(context_paths[0].resolve()),
+            "artifacts": artifacts,
         }

@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.5.0`
+Current local release: `v1.8.0`
 
 ## Usage
 
@@ -232,6 +232,7 @@ PYTHONPATH=src python3 -m legacy_sql_xml_analyzer invoke-java-bff --analysis-roo
 Review a saved Java BFF response, merge accepted phase outputs, and generate Java skeletons:
 
 ```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer compile-java-bff-context --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/orders.xml_main_OrderSearch/phase-2-repository-merge-OrderSearch.json --prompt-profile qwen3-128k-java-bff
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer review-java-bff-response --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/orders.xml_main_OrderSearch/phase-1-plan.json --response ./phase-1-plan.response.json
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer merge-java-bff-phases --analysis-root ./analysis-output --bundle-id orders.xml:main:OrderSearch
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer generate-java-bff-skeleton --analysis-root ./analysis-output --bundle-id orders.xml:main:OrderSearch --package-name com.example.legacybff
@@ -247,12 +248,23 @@ PYTHONPATH=src python3 -m legacy_sql_xml_analyzer inspect-java-bff-loop --output
 
 The Java BFF loop adds:
 
+- `analysis/java_bff/context_packs/*/*.json|*.md|*.txt`: phase-specific context packs compiled for weak models before provider or bridge execution
 - `analysis/java_bff/reviews/*/*-review.json`: accepted or repair-needed phase reviews
+- `analysis/java_bff/tasks/*/*.json`: Cline-bridge task contracts with compiled context and answer-schema expectations
+- `analysis/java_bff/agent_runs/*/*.result.json`: normalized provider, fake-runner, or bridge task results
 - `analysis/java_bff/merged/*/implementation_plan.json`: merged repository, BFF, and verification logic
 - `analysis/java_bff/skeletons/*/manifest.json`: emitted Java file manifest
 - `analysis/java_bff/skeletons/*/README.md`: handoff readme for the generated skeleton bundle
 - `analysis/java_bff/loop/loop_state.json`: resumable loop state
 - `analysis/java_bff/loop/completion_report.json`: final status with missing artifact tracking
+
+The Java BFF weak-model workflow now applies stronger reviewer guardrails before a phase is accepted:
+
+- repository chunk responses must keep the expected `query_id`, `chunk_id`, repository `method_name`, and known SQL parameter bindings
+- repository and merge phases are rejected when controller or service layer terms leak into JDBC/repository logic
+- assembly responses are rejected when JDBC details leak upward into service/controller planning
+- verify responses cannot mark a bundle `ready` while token checks fail, required artifacts are missing, or guess risks remain
+- responses that suggest rewriting Oracle 19c SQL shape instead of preserving analyzed query logic are rejected
 
 Collect accepted reviewed patches into a candidate profile:
 

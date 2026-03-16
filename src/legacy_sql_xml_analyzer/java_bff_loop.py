@@ -192,6 +192,9 @@ def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> 
                 "status": review["status"],
                 "prompt_path": str(next_prompt_path),
                 "review_path": review.get("review_json_path"),
+                "context_pack_path": run_result.get("context_pack_path"),
+                "task_path": run_result.get("task_path"),
+                "result_path": run_result.get("result_path"),
             },
         )
 
@@ -389,10 +392,22 @@ def refresh_completion_state(analysis_root: Path, state: dict[str, Any]) -> None
 
         for prompt_path in bundle.get("recommended_sequence", []):
             prompt_json = Path(str(prompt_path)).with_suffix(".json")
+            context_json = java_root / "context_packs" / slug / f"{safe_name(prompt_json.stem)}.json"
+            required.append(str(context_json.resolve()))
+            if context_json.exists():
+                completed.append(str(context_json.resolve()))
             review_json = java_root / "reviews" / slug / f"{safe_name(prompt_json.stem)}-review.json"
             required.append(str(review_json.resolve()))
             if review_json.exists():
                 completed.append(str(review_json.resolve()))
+            if str(state.get("config", {}).get("runner_mode") or "") == "cline_bridge":
+                task_json = java_root / "tasks" / slug / f"{safe_name(prompt_json.stem)}.json"
+                result_json = java_root / "agent_runs" / slug / f"{safe_name(prompt_json.stem)}.result.json"
+                required.extend([str(task_json.resolve()), str(result_json.resolve())])
+                if task_json.exists():
+                    completed.append(str(task_json.resolve()))
+                if result_json.exists():
+                    completed.append(str(result_json.resolve()))
 
         merged_json = java_root / "merged" / slug / "implementation_plan.json"
         required.append(str(merged_json.resolve()))

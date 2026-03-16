@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.0 - 2026-03-16
+
+- Added `compile-java-bff-context` plus `analysis/java_bff/context_packs/*/*.json|*.md|*.txt` so Java Spring Boot BFF phase prompts are recompiled into token-budgeted context packs before weak-model execution.
+- Tightened Java BFF review validation to cross-check query ids, chunk ids, repository method names, SQL parameter bindings, accepted upstream phase outputs, token-budget readiness, and guess-risk handling.
+- Added Java BFF Cline-bridge task contracts under `analysis/java_bff/tasks/*/*.json` and normalized bridge/provider task results under `analysis/java_bff/agent_runs/*/*.result.json`.
+- Expanded Java BFF loop completion tracking so context packs and Cline-bridge task/result artifacts are part of the required artifact contract.
+- Expanded the executive dashboard and artifact catalog with Java BFF context-pack, task, and task-result coverage for management reporting and operator visibility.
+- Added tests covering Java BFF context compilation, stricter weak-model review guardrails, verify-phase readiness checks, and Cline-bridge task contract generation.
+
 ## 1.5.0 - 2026-03-16
 
 - Added Java BFF phase-runtime commands for weak-model workflows: `invoke-java-bff`, `review-java-bff-response`, `merge-java-bff-phases`, and `generate-java-bff-skeleton`.

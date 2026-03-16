@@ -13,6 +13,7 @@ from .evolution import (
     simulate_candidate_profile,
 )
 from .java_bff import prepare_java_bff_from_input
+from .java_bff_context import compile_java_bff_context_pack, write_java_bff_context_pack
 from .java_bff_loop import (
     JavaBffLoopConfig,
     inspect_java_bff_loop,
@@ -241,6 +242,15 @@ def build_parser() -> argparse.ArgumentParser:
     java_bff_parser.add_argument("--entry-main-query", help="Optional main-query name to focus the Java BFF pack.")
     java_bff_parser.add_argument("--prompt-profile", default="qwen3-128k-java-bff", help="Prompt profile tuned for the target weak LLM.")
     java_bff_parser.add_argument("--max-sql-chunk-tokens", type=int, help="Optional SQL chunk token cap for phase-2 repository prompts.")
+
+    compile_java_context_parser = subparsers.add_parser(
+        "compile-java-bff-context",
+        help="Compile a phase-specific Java BFF context pack that stays within weak-model token budgets.",
+    )
+    compile_java_context_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    compile_java_context_parser.add_argument("--prompt-json", required=True, type=Path, help="Java BFF phase prompt JSON path.")
+    compile_java_context_parser.add_argument("--prompt-profile", help="Optional prompt profile override.")
+    compile_java_context_parser.add_argument("--max-input-tokens", type=int, help="Optional max input token override.")
 
     invoke_java_parser = subparsers.add_parser(
         "invoke-java-bff",
@@ -638,6 +648,21 @@ def main(argv: list[str] | None = None) -> int:
             f"Prepared Java BFF artifacts with bundles={payload['summary']['bundle_count']} "
             f"chunks={payload['summary']['chunk_count']} prompts={payload['summary']['prompt_count']} "
             f"chunk_token_limit={payload['summary']['chunk_token_limit']}."
+        )
+        return 0
+
+    if args.command == "compile-java-bff-context":
+        pack = compile_java_bff_context_pack(
+            analysis_root=args.analysis_root.resolve(),
+            phase_pack_path=args.prompt_json.resolve(),
+            prompt_profile=args.prompt_profile,
+            max_input_tokens=args.max_input_tokens,
+        )
+        paths = write_java_bff_context_pack(args.analysis_root.resolve(), pack)
+        print(
+            f"Compiled Java BFF context for phase={pack['phase']} bundle={pack['bundle_id']} "
+            f"estimated_tokens={pack['estimated_prompt_tokens']}/{pack['budget']['usable_input_limit']} "
+            f"missing_inputs={len(pack['missing_inputs'])} artifacts={len(paths)}."
         )
         return 0
 

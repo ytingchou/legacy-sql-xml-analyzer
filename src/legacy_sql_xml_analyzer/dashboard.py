@@ -355,7 +355,8 @@ def build_management_summary(
     if java_bff_summary.get("available"):
         summary.append(
             f"Java BFF pack has {java_bff_summary['bundle_count']} bundle(s), "
-            f"{java_bff_summary['accepted_review_count']} accepted review(s), and "
+            f"{java_bff_summary['accepted_review_count']} accepted review(s), "
+            f"{java_bff_summary['context_pack_count']} context pack(s), and "
             f"{java_bff_summary['skeleton_bundle_count']} skeleton bundle(s)."
         )
     return summary
@@ -811,6 +812,9 @@ def build_java_bff_summary(output_dir: Path) -> dict[str, Any]:
             "bundle_count": 0,
             "accepted_review_count": 0,
             "needs_revision_review_count": 0,
+            "context_pack_count": 0,
+            "task_count": 0,
+            "task_result_count": 0,
             "merged_bundle_count": 0,
             "skeleton_bundle_count": 0,
             "missing_merge_count": 0,
@@ -853,11 +857,17 @@ def build_java_bff_summary(output_dir: Path) -> dict[str, Any]:
         )
 
     loop_payload = load_json_payload(java_root / "loop" / "completion_report.json")
+    context_pack_count = sum(1 for _ in (java_root / "context_packs").glob("*/*.json")) if (java_root / "context_packs").exists() else 0
+    task_count = sum(1 for _ in (java_root / "tasks").glob("*/*.json")) if (java_root / "tasks").exists() else 0
+    task_result_count = sum(1 for _ in (java_root / "agent_runs").glob("*/*.result.json")) if (java_root / "agent_runs").exists() else 0
     return {
         "available": True,
         "bundle_count": len(bundle_rows),
         "accepted_review_count": sum(1 for item in review_rows if item.get("status") == "accepted"),
         "needs_revision_review_count": sum(1 for item in review_rows if item.get("status") == "needs_revision"),
+        "context_pack_count": context_pack_count,
+        "task_count": task_count,
+        "task_result_count": task_result_count,
         "merged_bundle_count": merged_bundle_count,
         "skeleton_bundle_count": skeleton_bundle_count,
         "missing_merge_count": max(len(bundle_rows) - merged_bundle_count, 0),
@@ -1012,6 +1022,7 @@ def render_executive_summary_markdown(summary: dict[str, Any]) -> str:
     if java_bff["available"]:
         lines.append(
             f"- Bundles: {java_bff['bundle_count']}, accepted reviews: {java_bff['accepted_review_count']}, "
+            f"context packs: {java_bff['context_pack_count']}, tasks: {java_bff['task_count']}, "
             f"merged bundles: {java_bff['merged_bundle_count']}, skeleton bundles: {java_bff['skeleton_bundle_count']}."
         )
         if java_bff.get("loop_status"):
@@ -1097,6 +1108,7 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
     )
     java_bff_summary = (
         f"Java BFF packs: bundles={java_bff['bundle_count']}, accepted reviews={java_bff['accepted_review_count']}, "
+        f"contexts={java_bff['context_pack_count']}, tasks={java_bff['task_count']}, "
         f"merged={java_bff['merged_bundle_count']}, skeletons={java_bff['skeleton_bundle_count']}."
         if java_bff["available"]
         else "No Java BFF artifact pack is available yet."
@@ -1346,6 +1358,8 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
         <div class="metric-grid">
           <div class="metric"><strong>{java_bff['bundle_count']}</strong><span>Bundles</span></div>
           <div class="metric"><strong>{java_bff['accepted_review_count']}</strong><span>Accepted Reviews</span></div>
+          <div class="metric"><strong>{java_bff['context_pack_count']}</strong><span>Context Packs</span></div>
+          <div class="metric"><strong>{java_bff['task_count']}</strong><span>Tasks</span></div>
           <div class="metric"><strong>{java_bff['merged_bundle_count']}</strong><span>Merged</span></div>
           <div class="metric"><strong>{java_bff['skeleton_bundle_count']}</strong><span>Skeletons</span></div>
         </div>
