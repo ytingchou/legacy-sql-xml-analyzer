@@ -26,6 +26,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "Always follow the prompt instructions exactly. "
     "If asked for JSON, return valid JSON only."
 )
+DEFAULT_PROVIDER_VALIDATION_PROMPT = (
+    'Return JSON only with this exact shape: {"provider_ok": true, "echo": "provider-validation"}. '
+    "Do not wrap the JSON in markdown."
+)
 
 
 @dataclass(slots=True)
@@ -44,6 +48,219 @@ class OpenAICompatibleConfig:
 
 class LlmProviderError(RuntimeError):
     pass
+
+
+def validate_provider_connection(
+    output_dir: Path,
+    provider_config_path: Path | None = None,
+    provider_base_url: str | None = None,
+    provider_api_key: str | None = None,
+    provider_api_key_env: str = "OPENAI_API_KEY",
+    provider_model: str | None = None,
+    provider_name: str | None = None,
+    token_limit: int | None = None,
+    temperature: float | None = None,
+    timeout_seconds: float | None = None,
+    prompt_text: str | None = None,
+    expect_json: bool = True,
+) -> dict[str, Any]:
+    output_dir = output_dir.resolve()
+    validation_root = output_dir / "analysis" / "provider_validation"
+    validation_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    run_token = sanitize_token(provider_name or provider_model or "provider")
+    run_dir = validation_root / f"{timestamp}-{run_token}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_prompt = str(prompt_text or DEFAULT_PROVIDER_VALIDATION_PROMPT)
+    input_debug = {
+        "provider_config_path": str(provider_config_path.resolve()) if provider_config_path else None,
+        "provider_base_url": provider_base_url,
+        "provider_api_key_supplied": bool(provider_api_key),
+        "provider_api_key_env": provider_api_key_env,
+        "provider_api_key_env_present": bool(os.environ.get(provider_api_key_env or "")),
+        "provider_model": provider_model,
+        "provider_name": provider_name,
+        "token_limit": token_limit,
+        "temperature": temperature,
+        "timeout_seconds": timeout_seconds,
+        "expect_json": expect_json,
+    }
+    debug_payload: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "validation_id": run_dir.name,
+        "status": "running",
+        "input": input_debug,
+        "prompt_preview": resolved_prompt[:500],
+        "prompt_estimated_tokens": max(1, round(len(resolved_prompt) / 4)),
+        "request_path": None,
+        "response_json_path": None,
+        "response_text_path": None,
+        "checks": [],
+        "error": None,
+        "troubleshooting_hints": [],
+    }
+    summary: dict[str, Any] = {
+        "generated_at": debug_payload["generated_at"],
+        "validation_id": run_dir.name,
+        "status": "failed",
+        "provider_name": provider_name or provider_model or "unknown",
+        "provider_model": provider_model or "unknown",
+        "provider_base_url": provider_base_url or "unknown",
+        "normalized_url": normalize_chat_completions_url(provider_base_url or "https://invalid-provider.local")
+        if provider_base_url
+        else None,
+        "token_limit": token_limit,
+        "temperature": temperature,
+        "timeout_seconds": timeout_seconds,
+        "expect_json": expect_json,
+        "checks": [],
+        "error": None,
+        "troubleshooting_hints": [],
+    }
+
+    request_path = run_dir / "request.json"
+    response_json_path = run_dir / "response.json"
+    response_text_path = run_dir / "response.txt"
+    debug_path = run_dir / "debug.json"
+    summary_path = run_dir / "summary.json"
+    summary_md_path = run_dir / "summary.md"
+
+    artifacts: list[Any] = []
+    try:
+        config = resolve_provider_config(
+            provider_config_path=provider_config_path,
+            provider_base_url=provider_base_url,
+            provider_api_key=provider_api_key,
+            provider_api_key_env=provider_api_key_env,
+            provider_model=provider_model,
+            provider_name=provider_name,
+            token_limit=token_limit,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+        )
+        summary.update(
+            {
+                "provider_name": config.provider_name or config.model,
+                "provider_model": config.model,
+                "provider_base_url": config.base_url,
+                "normalized_url": normalize_chat_completions_url(config.base_url),
+                "token_limit": config.token_limit,
+                "temperature": config.temperature,
+                "timeout_seconds": config.timeout_seconds,
+            }
+        )
+        debug_payload["resolved_config"] = build_provider_debug_snapshot(config, resolved_prompt)
+        debug_payload["checks"].append({"name": "config_resolution", "status": "passed", "detail": "Provider configuration resolved successfully."})
+
+        request_artifact = build_request_artifact(config, resolved_prompt)
+        request_path.write_text(json.dumps(request_artifact, indent=2, ensure_ascii=False), encoding="utf-8")
+        debug_payload["request_path"] = str(request_path)
+        debug_payload["checks"].append({"name": "request_artifact", "status": "passed", "detail": "Sanitized request artifact written before the live provider probe."})
+
+        response_payload = post_chat_completion(config=config, prompt_text=resolved_prompt)
+        response_json_path.write_text(json.dumps(response_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        debug_payload["response_json_path"] = str(response_json_path)
+        debug_payload["checks"].append({"name": "chat_completions", "status": "passed", "detail": "Provider accepted the OpenAI-compatible chat/completions request."})
+
+        response_text = extract_response_text(response_payload)
+        response_text_path.write_text(response_text, encoding="utf-8")
+        debug_payload["response_text_path"] = str(response_text_path)
+        debug_payload["response_text_preview"] = response_text[:500]
+        debug_payload["checks"].append({"name": "response_text", "status": "passed", "detail": "choices[0].message.content was extracted successfully."})
+
+        warnings: list[dict[str, Any]] = []
+        if expect_json:
+            try:
+                parsed = json.loads(response_text)
+            except json.JSONDecodeError as exc:
+                warnings.append(
+                    {
+                        "name": "json_echo",
+                        "status": "warning",
+                        "detail": f"Provider returned text but not valid JSON: {exc.msg}.",
+                    }
+                )
+                debug_payload["response_json_parse_error"] = exc.msg
+            else:
+                debug_payload["parsed_response"] = parsed
+                warnings.append({"name": "json_echo", "status": "passed", "detail": "Provider returned valid JSON for the probe prompt."})
+
+        all_checks = [*debug_payload["checks"], *warnings]
+        status = "passed_with_warnings" if any(item["status"] == "warning" for item in warnings) else "passed"
+        troubleshooting_hints = build_provider_troubleshooting_hints(
+            error_message=None,
+            normalized_url=summary["normalized_url"],
+            expect_json=expect_json,
+            status=status,
+        )
+
+        summary.update(
+            {
+                "status": status,
+                "checks": all_checks,
+                "error": None,
+                "response_usage": response_payload.get("usage", {}),
+                "response_id": response_payload.get("id"),
+                "response_text_path": str(response_text_path),
+                "response_json_path": str(response_json_path),
+                "request_path": str(request_path),
+                "troubleshooting_hints": troubleshooting_hints,
+            }
+        )
+        debug_payload["status"] = status
+        debug_payload["checks"] = all_checks
+        debug_payload["troubleshooting_hints"] = troubleshooting_hints
+    except Exception as exc:
+        error_message = str(exc)
+        error_payload = {
+            "type": type(exc).__name__,
+            "message": error_message,
+            "category": classify_provider_error(error_message),
+        }
+        failed_checks = [*debug_payload["checks"], {"name": "live_probe", "status": "failed", "detail": error_message}]
+        troubleshooting_hints = build_provider_troubleshooting_hints(
+            error_message=error_message,
+            normalized_url=summary.get("normalized_url"),
+            expect_json=expect_json,
+            status="failed",
+        )
+        summary.update(
+            {
+                "status": "failed",
+                "checks": failed_checks,
+                "error": error_payload,
+                "request_path": str(request_path) if request_path.exists() else None,
+                "response_json_path": str(response_json_path) if response_json_path.exists() else None,
+                "response_text_path": str(response_text_path) if response_text_path.exists() else None,
+                "troubleshooting_hints": troubleshooting_hints,
+            }
+        )
+        debug_payload["status"] = "failed"
+        debug_payload["checks"] = failed_checks
+        debug_payload["error"] = error_payload
+        debug_payload["troubleshooting_hints"] = troubleshooting_hints
+
+    debug_path.write_text(json.dumps(debug_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    summary["debug_path"] = str(debug_path)
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    summary_md_path.write_text(render_provider_validation_markdown(summary), encoding="utf-8")
+
+    artifacts.extend(
+        [
+            artifact_descriptor_for_path(summary_path, "json", f"Provider validation summary: {summary['provider_name']}", "provider"),
+            artifact_descriptor_for_path(summary_md_path, "markdown", f"Provider validation summary (Markdown): {summary['provider_name']}", "provider"),
+            artifact_descriptor_for_path(debug_path, "json", f"Provider validation debug: {summary['provider_name']}", "provider"),
+        ]
+    )
+    if request_path.exists():
+        artifacts.append(artifact_descriptor_for_path(request_path, "json", f"Provider validation request: {summary['provider_name']}", "provider"))
+    if response_json_path.exists():
+        artifacts.append(artifact_descriptor_for_path(response_json_path, "json", f"Provider validation response JSON: {summary['provider_name']}", "provider"))
+    if response_text_path.exists():
+        artifacts.append(artifact_descriptor_for_path(response_text_path, "text", f"Provider validation response text: {summary['provider_name']}", "provider"))
+    append_artifacts_to_index(output_dir, artifacts)
+    return {"summary": summary, "artifacts": artifacts}
 
 
 def invoke_llm_from_analysis(
@@ -173,6 +390,109 @@ def invoke_llm_from_analysis(
         "artifacts": all_artifacts,
         "review": review_result,
     }
+
+
+def build_provider_debug_snapshot(config: OpenAICompatibleConfig, prompt_text: str) -> dict[str, Any]:
+    return {
+        "provider_name": config.provider_name or config.model,
+        "provider_model": config.model,
+        "provider_base_url": config.base_url,
+        "normalized_url": normalize_chat_completions_url(config.base_url),
+        "api_key_env": config.api_key_env,
+        "api_key_present": bool(config.api_key),
+        "header_names": sorted(["Content-Type", "Accept", "Authorization", *config.headers.keys()]),
+        "token_limit": config.token_limit,
+        "temperature": config.temperature,
+        "timeout_seconds": config.timeout_seconds,
+        "system_prompt_present": bool(config.system_prompt),
+        "prompt_estimated_tokens": max(1, round(len(prompt_text) / 4)),
+    }
+
+
+def classify_provider_error(message: str) -> str:
+    lowered = message.lower()
+    if "api key" in lowered or "401" in lowered or "403" in lowered:
+        return "authentication"
+    if "base url" in lowered or "404" in lowered:
+        return "endpoint"
+    if "rate-limit" in lowered or "rate limited" in lowered or "429" in lowered:
+        return "rate_limit"
+    if "non-json" in lowered or "json" in lowered and "returned" in lowered:
+        return "response_format"
+    if "missing choices" in lowered or "message.content" in lowered:
+        return "response_shape"
+    if "failed to reach" in lowered or "network" in lowered or "timed out" in lowered:
+        return "network"
+    if "token limit" in lowered or "max_tokens" in lowered:
+        return "token_limit"
+    if "timeout" in lowered:
+        return "timeout"
+    return "unknown"
+
+
+def build_provider_troubleshooting_hints(
+    error_message: str | None,
+    normalized_url: str | None,
+    expect_json: bool,
+    status: str,
+) -> list[str]:
+    hints: list[str] = []
+    if normalized_url:
+        hints.append(f"Confirm the provider root resolves to `{normalized_url}` and that the endpoint is OpenAI-compatible.")
+    if expect_json:
+        hints.append("Use a short probe prompt that requests JSON only so response-shape issues are easy to isolate.")
+    if status == "passed_with_warnings":
+        hints.append("The provider is reachable, but the model did not follow the JSON probe exactly; tighten system prompt or lower temperature.")
+    lowered = (error_message or "").lower()
+    if "api key" in lowered or "401" in lowered or "403" in lowered:
+        hints.append("Check whether the API key is present in the configured env var and whether the provider expects Bearer authentication.")
+    if "404" in lowered or "base url" in lowered:
+        hints.append("Use the provider /v1 root instead of a nested path unless the vendor documents a different OpenAI-compatible route.")
+    if "failed to reach" in lowered or "network" in lowered:
+        hints.append("Verify outbound network access, DNS resolution, and TLS interception rules in the company environment.")
+    if "429" in lowered:
+        hints.append("Reduce concurrency or switch to a model quota that allows the current request rate.")
+    if "non-json" in lowered or "response_format" in lowered:
+        hints.append("Inspect the saved response preview to confirm whether the provider returned HTML, plaintext, or a vendor-specific envelope.")
+    if "missing choices" in lowered or "message.content" in lowered:
+        hints.append("The provider response is not OpenAI-compatible enough; compare its JSON envelope against choices[0].message.content.")
+    if not hints:
+        hints.append("Inspect the saved debug.json and summary.json artifacts for the exact request settings and failure classification.")
+    return hints
+
+
+def render_provider_validation_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        "# Provider Validation Summary",
+        "",
+        f"- Status: `{summary['status']}`",
+        f"- Provider: `{summary['provider_name']}`",
+        f"- Model: `{summary['provider_model']}`",
+        f"- URL: `{summary.get('normalized_url') or summary.get('provider_base_url') or 'n/a'}`",
+        f"- Token limit: `{summary.get('token_limit')}`",
+        f"- Temperature: `{summary.get('temperature')}`",
+        "",
+        "## Checks",
+    ]
+    for item in summary.get("checks", []):
+        lines.append(f"- `{item.get('name')}`: `{item.get('status')}` - {item.get('detail')}")
+    if summary.get("error"):
+        lines.extend(
+            [
+                "",
+                "## Error",
+                f"- Type: `{summary['error'].get('type')}`",
+                f"- Category: `{summary['error'].get('category')}`",
+                f"- Message: `{summary['error'].get('message')}`",
+            ]
+        )
+    if summary.get("troubleshooting_hints"):
+        lines.extend(["", "## Troubleshooting"])
+        for hint in summary["troubleshooting_hints"]:
+            lines.append(f"- {hint}")
+    if summary.get("debug_path"):
+        lines.extend(["", "## Artifacts", f"- Debug JSON: `{summary['debug_path']}`"])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def resolve_provider_config(

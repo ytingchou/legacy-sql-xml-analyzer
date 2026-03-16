@@ -78,7 +78,7 @@ class JavaBffLoopConfig:
         )
 
 
-def run_java_bff_loop(config: JavaBffLoopConfig, runner: Any | None = None) -> dict[str, Any]:
+def run_java_bff_loop(config: JavaBffLoopConfig, runner: Any | None = None, reporter: Any | None = None) -> dict[str, Any]:
     entry_file = config.entry_file
     entry_main_query = config.entry_main_query
     if config.bundle_id and not entry_file and not entry_main_query:
@@ -97,6 +97,7 @@ def run_java_bff_loop(config: JavaBffLoopConfig, runner: Any | None = None) -> d
     )
     state = build_initial_state(config)
     persist_loop_state(config.output_dir, state)
+    notify_progress(reporter, "java-bff-loop", "started", run_id=state["run_id"], output=config.output_dir.resolve())
     append_loop_history(
         config.output_dir,
         {
@@ -105,13 +106,14 @@ def run_java_bff_loop(config: JavaBffLoopConfig, runner: Any | None = None) -> d
             "status": "started",
         },
     )
-    return _run_loop(config=config, state=state, runner=runner or build_runner(config))
+    return _run_loop(config=config, state=state, runner=runner or build_runner(config), reporter=reporter)
 
 
-def resume_java_bff_loop(output_dir: Path, config: JavaBffLoopConfig | None = None, runner: Any | None = None) -> dict[str, Any]:
+def resume_java_bff_loop(output_dir: Path, config: JavaBffLoopConfig | None = None, runner: Any | None = None, reporter: Any | None = None) -> dict[str, Any]:
     state = load_loop_state(output_dir)
     resolved_config = config or JavaBffLoopConfig.from_dict(state["config"])
-    return _run_loop(config=resolved_config, state=state, runner=runner or build_runner(resolved_config))
+    notify_progress(reporter, "java-bff-loop", "resumed", run_id=state["run_id"], output=output_dir.resolve())
+    return _run_loop(config=resolved_config, state=state, runner=runner or build_runner(resolved_config), reporter=reporter)
 
 
 def inspect_java_bff_loop(output_dir: Path) -> dict[str, Any]:
@@ -128,7 +130,7 @@ def inspect_java_bff_loop(output_dir: Path) -> dict[str, Any]:
     return payload
 
 
-def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> dict[str, Any]:
+def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any, reporter: Any | None = None) -> dict[str, Any]:
     output_dir = config.output_dir.resolve()
     analysis_root = output_dir / "analysis"
     while True:
@@ -137,10 +139,12 @@ def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> 
             state["status"] = "stopped"
             state["stop_reason"] = "max_iterations_reached"
             persist_loop_state(output_dir, state)
+            notify_warning(reporter, "Java BFF loop stopped.", stop_reason=state["stop_reason"], iterations=state.get("iteration_count", 0))
             return write_completion_report(output_dir, state)
 
         next_prompt_path = select_next_prompt(state, analysis_root)
         if next_prompt_path is None:
+            notify_progress(reporter, "java-bff-loop", "finalize", bundles=len(selected_bundles(analysis_root, state)))
             finalize_merges_and_skeletons(analysis_root, state, package_name=config.package_name)
             refresh_completion_state(analysis_root, state)
             if state["missing_artifacts"]:
@@ -150,6 +154,10 @@ def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> 
                 state["status"] = "completed"
                 state["stop_reason"] = "all_artifacts_completed"
             persist_loop_state(output_dir, state)
+            if state["status"] == "completed":
+                notify_success(reporter, "Java BFF loop completed.", stop_reason=state["stop_reason"])
+            else:
+                notify_warning(reporter, "Java BFF loop stopped.", stop_reason=state["stop_reason"], missing_artifacts=len(state["missing_artifacts"]))
             return write_completion_report(output_dir, state)
 
         state["current_prompt_json_path"] = str(next_prompt_path.resolve())
@@ -157,6 +165,14 @@ def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> 
         attempts = state.setdefault("prompt_attempts", {})
         attempts[str(next_prompt_path.resolve())] = attempts.get(str(next_prompt_path.resolve()), 0) + 1
         persist_loop_state(output_dir, state)
+        notify_progress(
+            reporter,
+            "java-bff-loop",
+            "prompt-start",
+            iteration=int(state.get("iteration_count", 0)) + 1,
+            prompt=next_prompt_path.name,
+            attempt=attempts[str(next_prompt_path.resolve())],
+        )
 
         try:
             run_result = runner.run_phase_pack(analysis_root=analysis_root, phase_pack_path=next_prompt_path)
@@ -168,7 +184,14 @@ def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> 
         except Exception as exc:  # noqa: BLE001
             state["status"] = "failed"
             state["stop_reason"] = "java_bff_phase_failed"
-            state["last_error"] = {"prompt_path": str(next_prompt_path), "message": str(exc)}
+            state["last_error"] = {"prompt_path": str(next_prompt_path), "type": type(exc).__name__, "message": str(exc)}
+            notify_error(
+                reporter,
+                "Java BFF phase failed.",
+                prompt=next_prompt_path.name,
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
             append_loop_history(
                 output_dir,
                 {
@@ -184,6 +207,15 @@ def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> 
             return write_completion_report(output_dir, state)
 
         review = review_result["review"]
+        notify_progress(
+            reporter,
+            "java-bff-loop",
+            "prompt-reviewed",
+            phase=review["phase"],
+            status=review["status"],
+            prompt=next_prompt_path.name,
+            issues=len(review.get("issues", [])),
+        )
         append_loop_history(
             output_dir,
             {
@@ -212,8 +244,10 @@ def _run_loop(config: JavaBffLoopConfig, state: dict[str, Any], runner: Any) -> 
             state["stop_reason"] = "java_bff_human_review_required"
             state["last_error"] = {
                 "prompt_path": str(next_prompt_path),
+                "type": "HumanReviewRequired",
                 "message": "Max attempts exceeded for Java BFF prompt.",
             }
+            notify_warning(reporter, "Java BFF prompt requires human review.", prompt=next_prompt_path.name, attempts=attempts[prompt_key])
             refresh_completion_state(analysis_root, state)
             persist_loop_state(output_dir, state)
             return write_completion_report(output_dir, state)
@@ -485,3 +519,38 @@ def loop_root(output_dir: Path) -> Path:
 
 def timestamp_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def notify_progress(reporter: Any | None, label: str, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    progress = getattr(reporter, "progress", None)
+    if callable(progress):
+        progress(label, message, **fields)
+
+
+def notify_warning(reporter: Any | None, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    warning = getattr(reporter, "warning", None)
+    if callable(warning):
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+        warning(f"{message} {details}".strip())
+
+
+def notify_error(reporter: Any | None, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    error = getattr(reporter, "error", None)
+    if callable(error):
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+        error(f"{message} {details}".strip())
+
+
+def notify_success(reporter: Any | None, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    success = getattr(reporter, "success", None)
+    if callable(success):
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+        success(f"{message} {details}".strip())

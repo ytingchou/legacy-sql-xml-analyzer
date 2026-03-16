@@ -4,7 +4,12 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.8.0`
+Current local release: `v1.9.0`
+
+Most CLI commands also support:
+
+- `--verbose`: print extra debug detail and traceback information on failure
+- `--no-progress`: suppress live progress lines when you want quieter logs
 
 ## Usage
 
@@ -157,6 +162,22 @@ PYTHONPATH=src python3 -m legacy_sql_xml_analyzer invoke-llm --analysis-root ./a
 - the extracted assistant text
 - token-limit and usage metadata for later debugging
 - optional automatic review output when `--review` is enabled
+
+Validate an OpenAI-compatible provider before you run weak-model workflows:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer validate-provider --output ./analysis-output --provider-config ./provider.json
+```
+
+`validate-provider` sends a short probe request and saves:
+
+- `analysis/provider_validation/*/summary.json`: pass/fail result, checks, and troubleshooting hints
+- `analysis/provider_validation/*/debug.json`: config snapshot, normalized URL, prompt stats, and failure classification
+- `analysis/provider_validation/*/request.json`: sanitized request payload without the API key
+- `analysis/provider_validation/*/response.json`: raw provider JSON when the request succeeds
+- `analysis/provider_validation/*/response.txt`: extracted assistant text when the response shape is compatible
+
+This is useful when a company provider is only partially OpenAI-compatible or when you need to isolate whether the problem is API key, endpoint path, network reachability, response JSON shape, or JSON-only instruction following.
 
 Compile a phase-specific context pack for weak 128k-token models such as Qwen3:
 

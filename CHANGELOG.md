@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.0 - 2026-03-16
+
+- Added a shared CLI console/reporting layer with global `--verbose` and `--no-progress` flags across the command surface.
+- Added live progress reporting for the autonomous analyzer loop and Java BFF loop so phase, prompt, attempt, and stop-state transitions are visible while the command runs.
+- Added formatted CLI failure blocks with actionable hints, related artifact paths, and optional traceback output in verbose mode.
+- Added `validate-provider` artifacts for provider connectivity and compatibility debugging, including saved request/response/debug payloads and failure categorization.
+- Added tests covering console formatting and provider validation success/failure debug flows.
+
 ## 1.8.0 - 2026-03-16
 
 - Added `compile-java-bff-context` plus `analysis/java_bff/context_packs/*/*.json|*.md|*.txt` so Java Spring Boot BFF phase prompts are recompiled into token-budgeted context packs before weak-model execution.

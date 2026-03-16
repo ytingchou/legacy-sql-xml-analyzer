@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .agent_loop import inspect_agent_loop, resume_agent_loop, run_agent_loop
 from .analyzer import analyze_directory
+from .console import ConsoleReporter
 from .context_compiler import compile_context_pack_from_analysis, write_context_pack
 from .evolution import (
     apply_profile_patch_bundle,
@@ -27,7 +28,7 @@ from .java_bff_workflow import (
     review_java_bff_response_from_analysis,
 )
 from .lifecycle import grade_profile, promote_profile, rollback_profile
-from .llm_provider import invoke_llm_from_analysis
+from .llm_provider import LlmProviderError, invoke_llm_from_analysis, validate_provider_connection
 from .learning import freeze_profile, infer_rules, learn_directory
 from .prompt_profiles import phase_budget_for
 from .prompting import prepare_prompt_pack_from_analysis
@@ -110,6 +111,23 @@ def build_parser() -> argparse.ArgumentParser:
     invoke_parser.add_argument("--timeout-seconds", type=float, help="HTTP timeout for provider requests.")
     invoke_parser.add_argument("--review", action="store_true", help="Immediately run review-llm-response on the saved response text.")
     invoke_parser.add_argument("--profile", type=Path, help="Optional profile JSON used during review to detect redundant or conflicting rules.")
+
+    validate_provider_parser = subparsers.add_parser(
+        "validate-provider",
+        help="Validate an OpenAI-compatible LLM provider connection and save debug artifacts.",
+    )
+    validate_provider_parser.add_argument("--output", required=True, type=Path, help="Output directory for provider validation artifacts.")
+    validate_provider_parser.add_argument("--provider-config", type=Path, help="Optional JSON config for the OpenAI-compatible provider.")
+    validate_provider_parser.add_argument("--provider-base-url", help="Provider base URL or /v1 root for the OpenAI-compatible endpoint.")
+    validate_provider_parser.add_argument("--provider-api-key", help="Provider API key. If omitted, --provider-api-key-env or provider-config is used.")
+    validate_provider_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY", help="Environment variable name that stores the provider API key.")
+    validate_provider_parser.add_argument("--provider-model", help="Provider model id to send to the chat/completions endpoint.")
+    validate_provider_parser.add_argument("--provider-name", help="Optional provider label for saved artifacts.")
+    validate_provider_parser.add_argument("--token-limit", type=int, help="Maximum completion tokens to request from the provider.")
+    validate_provider_parser.add_argument("--temperature", type=float, help="Sampling temperature sent to the provider.")
+    validate_provider_parser.add_argument("--timeout-seconds", type=float, help="HTTP timeout for provider requests.")
+    validate_provider_parser.add_argument("--prompt-text", help="Optional probe prompt override.")
+    validate_provider_parser.add_argument("--no-expect-json", action="store_true", help="Skip the probe JSON-shape check and only validate connectivity plus response text extraction.")
 
     review_parser = subparsers.add_parser(
         "review-llm-response",
@@ -340,14 +358,151 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect Java BFF loop state and history.",
     )
     inspect_java_loop_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis/java_bff/loop/loop_state.json.")
+    apply_common_runtime_flags(
+        [
+            analyze_parser,
+            learn_parser,
+            infer_parser,
+            freeze_parser,
+            validate_parser,
+            serve_parser,
+            prompt_parser,
+            invoke_parser,
+            validate_provider_parser,
+            review_parser,
+            propose_parser,
+            apply_patch_parser,
+            simulate_parser,
+            grade_parser,
+            promote_parser,
+            rollback_parser,
+            context_parser,
+            loop_parser,
+            resume_parser,
+            inspect_parser,
+            java_bff_parser,
+            compile_java_context_parser,
+            invoke_java_parser,
+            review_java_parser,
+            merge_java_parser,
+            skeleton_java_parser,
+            java_loop_parser,
+            resume_java_loop_parser,
+            inspect_java_loop_parser,
+        ]
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def apply_common_runtime_flags(parsers: list[argparse.ArgumentParser]) -> None:
+    for parser in parsers:
+        parser.add_argument("--verbose", action="store_true", help="Print extra debug information and traceback details on failure.")
+        parser.add_argument("--no-progress", action="store_true", help="Suppress progress lines while the command is running.")
 
+
+def build_reporter(args: argparse.Namespace) -> ConsoleReporter:
+    return ConsoleReporter(verbose=bool(getattr(args, "verbose", False)), progress_enabled=not bool(getattr(args, "no_progress", False)))
+
+
+def emit_command_start(reporter: ConsoleReporter, command: str, **fields: object) -> None:
+    reporter.progress(command, "starting", **fields)
+
+
+def summarize_loop_result(
+    reporter: ConsoleReporter,
+    *,
+    label: str,
+    payload: dict[str, object],
+    completion_path: Path,
+) -> int:
+    status = str(payload.get("status") or "unknown")
+    stop_reason = str(payload.get("stop_reason") or "n/a")
+    missing_count = len(payload.get("missing_artifacts", [])) if isinstance(payload.get("missing_artifacts"), list) else 0
+    iterations = payload.get("iterations", payload.get("iteration_count", "n/a"))
+    message = (
+        f"{label} finished with status={status} stop_reason={stop_reason} "
+        f"iterations={iterations} missing_artifacts={missing_count}."
+    )
+    if status == "completed":
+        reporter.success(message)
+        reporter.detail(f"Completion report: {completion_path}")
+        return 0
+    reporter.warning(message)
+    last_error = payload.get("last_error")
+    if isinstance(last_error, dict) and last_error:
+        reporter.error(
+            "Last error: "
+            + ", ".join(
+                f"{key}={value}" for key, value in last_error.items() if value is not None and value != ""
+            )
+        )
+    reporter.info(f"Completion report: {completion_path}")
+    return 1 if status == "failed" else 2
+
+
+def build_command_artifact_hints(args: argparse.Namespace) -> list[str]:
+    hints: list[str] = []
+    command = str(getattr(args, "command", ""))
+    if command in {"run-agent-loop", "resume-agent-loop", "inspect-agent-loop"} and getattr(args, "output", None):
+        output = args.output.resolve()
+        hints.extend(
+            [
+                str(output / "analysis" / "agent_loop" / "loop_state.json"),
+                str(output / "analysis" / "agent_loop" / "completion_report.md"),
+            ]
+        )
+    if command in {"run-java-bff-loop", "resume-java-bff-loop", "inspect-java-bff-loop"} and getattr(args, "output", None):
+        output = args.output.resolve()
+        hints.extend(
+            [
+                str(output / "analysis" / "java_bff" / "loop" / "loop_state.json"),
+                str(output / "analysis" / "java_bff" / "loop" / "completion_report.md"),
+            ]
+        )
+    if command == "validate-provider" and getattr(args, "output", None):
+        output = args.output.resolve()
+        hints.append(str(output / "analysis" / "provider_validation"))
+    if command in {"invoke-llm", "invoke-java-bff"} and getattr(args, "analysis_root", None):
+        analysis_root = args.analysis_root.resolve()
+        hints.append(str(analysis_root / "llm_runs"))
+    return hints
+
+
+def build_error_hints(args: argparse.Namespace, exc: Exception) -> list[str]:
+    command = str(getattr(args, "command", ""))
+    hints: list[str] = []
+    if isinstance(exc, LlmProviderError):
+        hints.append("Run `validate-provider` with the same provider settings to isolate config, endpoint, or response-shape problems.")
+    if isinstance(exc, FileNotFoundError):
+        hints.append("Check whether the input path or a generated artifact path exists and whether the previous step finished successfully.")
+    if type(exc).__name__ == "JSONDecodeError":
+        hints.append("Inspect the referenced JSON file or provider response for truncation, HTML error pages, or malformed content.")
+    message = str(exc).lower()
+    if "api key" in message:
+        hints.append("Confirm the provider API key or configured env var is present in this shell session.")
+    if "choices[0].message.content" in message or "non-json" in message:
+        hints.append("The provider response may not be OpenAI-compatible enough; inspect the saved response artifact or validate-provider debug output.")
+    if command in {"run-agent-loop", "resume-agent-loop"}:
+        hints.append("Use `inspect-agent-loop` after a stopped run to see the latest phase state and history.")
+    if command in {"run-java-bff-loop", "resume-java-bff-loop"}:
+        hints.append("Use `inspect-java-bff-loop` after a stopped run to inspect the latest prompt, review, and missing artifacts.")
+    if not hints:
+        hints.append("Inspect the command-specific output artifacts and rerun with `--verbose` for the traceback.")
+    return hints
+
+
+def handle_cli_exception(args: argparse.Namespace, reporter: ConsoleReporter, exc: Exception) -> int:
+    reporter.exception(
+        exc,
+        hints=build_error_hints(args, exc),
+        artifact_paths=build_command_artifact_hints(args),
+    )
+    return 1
+
+
+def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, reporter: ConsoleReporter) -> int:
     if args.command == "analyze":
+        emit_command_start(reporter, "analyze", input=args.input.resolve(), output=args.output.resolve())
         result = analyze_directory(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -357,43 +512,46 @@ def main(argv: list[str] | None = None) -> int:
             profile_path=args.profile.resolve() if args.profile else None,
             snapshot_label=args.snapshot_label,
         )
-
         error_count = sum(1 for diag in result.diagnostics if diag.severity in {"error", "fatal"})
         warning_count = sum(1 for diag in result.diagnostics if diag.severity == "warning")
-        print(
+        reporter.success(
             f"Analyzed {len(result.files)} file(s), discovered {len(result.queries)} query node(s), "
             f"generated {len(result.artifacts)} artifact(s), errors={error_count}, warnings={warning_count}."
         )
-
+        reporter.detail(f"Executive summary: {args.output.resolve() / 'analysis' / 'executive_summary.md'}")
         if args.strict and error_count:
-            print("Strict mode detected error/fatal diagnostics. See analysis/markdown/diagnostics for details.")
+            reporter.warning("Strict mode detected error/fatal diagnostics. See analysis/markdown/diagnostics for details.")
             return 2
         return 0
 
     if args.command == "learn":
+        emit_command_start(reporter, "learn", input=args.input.resolve(), output=args.output.resolve())
         result = learn_directory(args.input.resolve(), args.output.resolve())
-        print(
+        reporter.success(
             f"Learned from {result['observations']['summary']['xml_file_count']} file(s), "
             f"generated {len(result['artifacts'])} learning artifact(s)."
         )
         return 0
 
     if args.command == "infer-rules":
+        emit_command_start(reporter, "infer-rules", input=args.input.resolve(), output=args.output.resolve())
         result = infer_rules(args.input.resolve(), args.output.resolve())
-        print(
+        reporter.success(
             f"Inferred {len(result['profile'].rules)} rule candidate(s), "
             f"generated {len(result['artifacts'])} rule artifact(s)."
         )
         return 0
 
     if args.command == "freeze-profile":
+        emit_command_start(reporter, "freeze-profile", input=args.input.resolve(), output=args.output.resolve())
         profile = freeze_profile(args.input.resolve(), args.output.resolve(), args.min_confidence)
-        print(
+        reporter.success(
             f"Froze profile with {len(profile.rules)} retained rule(s) at confidence >= {args.min_confidence:.2f}."
         )
         return 0
 
     if args.command == "validate-profile":
+        emit_command_start(reporter, "validate-profile", input=args.input.resolve(), output=args.output.resolve())
         result = validate_profile(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -402,33 +560,36 @@ def main(argv: list[str] | None = None) -> int:
             entry_main_query=args.entry_main_query,
         )
         classification = result["assessment"]["classification"]
-        print(
+        reporter.success(
             f"Validated profile with classification={classification}, "
             f"generated {len(result['artifacts'])} validation artifact(s)."
         )
         if args.fail_on_regression and classification == "regressed":
-            print("Validation detected regression. See validation/profile_validation.md for details.")
+            reporter.warning("Validation detected regression. See validation/profile_validation.md for details.")
             return 3
         return 0
 
     if args.command == "serve-report":
+        emit_command_start(reporter, "serve-report", root=args.root.resolve(), host=args.host, port=args.port)
         serve_report(root=args.root.resolve(), host=args.host, port=args.port)
         return 0
 
     if args.command == "prepare-prompt":
+        emit_command_start(reporter, "prepare-prompt", cluster=args.cluster, budget=args.budget)
         result = prepare_prompt_pack_from_analysis(
             analysis_root=args.analysis_root.resolve(),
             cluster_id=args.cluster,
             budget=args.budget,
             model=args.model,
         )
-        print(
+        reporter.success(
             f"Prepared prompt pack for cluster={result['cluster']['cluster_id']}, "
             f"generated {len(result['artifacts'])} artifact(s)."
         )
         return 0
 
     if args.command == "invoke-llm":
+        emit_command_start(reporter, "invoke-llm", cluster=args.cluster, stage=args.stage, budget=args.budget)
         result = invoke_llm_from_analysis(
             analysis_root=args.analysis_root.resolve(),
             cluster_id=args.cluster,
@@ -448,14 +609,47 @@ def main(argv: list[str] | None = None) -> int:
             profile_path=args.profile.resolve() if args.profile else None,
         )
         summary = result["run_summary"]
-        print(
+        reporter.success(
             f"Invoked provider={summary['provider_name']} model={summary['provider_model']} "
             f"for cluster={summary['cluster_id']} stage={summary['stage']} token_limit={summary['token_limit']}, "
             f"generated {len(result['artifacts'])} artifact(s)."
         )
+        reporter.detail(f"LLM run summary: {summary.get('prompt_path')}")
+        return 0
+
+    if args.command == "validate-provider":
+        emit_command_start(reporter, "validate-provider", output=args.output.resolve())
+        result = validate_provider_connection(
+            output_dir=args.output.resolve(),
+            provider_config_path=args.provider_config.resolve() if args.provider_config else None,
+            provider_base_url=args.provider_base_url,
+            provider_api_key=args.provider_api_key,
+            provider_api_key_env=args.provider_api_key_env,
+            provider_model=args.provider_model,
+            provider_name=args.provider_name,
+            token_limit=args.token_limit,
+            temperature=args.temperature,
+            timeout_seconds=args.timeout_seconds,
+            prompt_text=args.prompt_text,
+            expect_json=not args.no_expect_json,
+        )
+        summary = result["summary"]
+        if summary["status"] == "failed":
+            reporter.warning(
+                f"Validated provider={summary['provider_name']} model={summary['provider_model']} "
+                f"status={summary['status']} checks={len(summary.get('checks', []))}."
+            )
+            reporter.info(f"Provider debug: {summary.get('debug_path') or 'n/a'}")
+            return 1
+        reporter.success(
+            f"Validated provider={summary['provider_name']} model={summary['provider_model']} "
+            f"status={summary['status']} checks={len(summary.get('checks', []))}."
+        )
+        reporter.detail(f"Provider debug: {summary.get('debug_path') or 'n/a'}")
         return 0
 
     if args.command == "review-llm-response":
+        emit_command_start(reporter, "review-llm-response", cluster=args.cluster, stage=args.stage)
         result = review_llm_response_from_analysis(
             analysis_root=args.analysis_root.resolve(),
             cluster_id=args.cluster,
@@ -466,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
             profile_path=args.profile.resolve() if args.profile else None,
         )
         review = result["review"]
-        print(
+        reporter.success(
             f"Reviewed response for cluster={result['cluster']['cluster_id']} stage={review['stage']} "
             f"status={review['status']}, issues={len(review['issues'])}, "
             f"safe_to_apply_candidate={review['safe_to_apply_candidate']}."
@@ -474,13 +668,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "propose-rules":
+        emit_command_start(reporter, "propose-rules", analysis_root=args.analysis_root.resolve())
         result = propose_rules_from_analysis(
             analysis_root=args.analysis_root.resolve(),
             profile_path=args.profile.resolve() if args.profile else None,
             min_confidence=args.min_confidence,
             include_needs_review=args.include_needs_review,
         )
-        print(
+        reporter.success(
             f"Proposed {result['proposal_payload']['summary']['accepted_patch_count']} patch(es), "
             f"candidate profile rules={len(result['candidate_profile'].rules)}, "
             f"generated {len(result['artifacts'])} artifact(s)."
@@ -488,17 +683,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "apply-profile-patch":
+        emit_command_start(reporter, "apply-profile-patch", output=args.output.resolve())
         profile = apply_profile_patch_bundle(
             patch_bundle_path=args.patch_bundle.resolve(),
             output_path=args.output.resolve(),
             profile_path=args.profile.resolve() if args.profile else None,
         )
-        print(
-            f"Wrote merged profile with {len(profile.rules)} rule(s) to {args.output.resolve()}."
-        )
+        reporter.success(f"Wrote merged profile with {len(profile.rules)} rule(s) to {args.output.resolve()}.")
         return 0
 
     if args.command == "simulate-profile":
+        emit_command_start(reporter, "simulate-profile", input=args.input.resolve(), output=args.output.resolve())
         result = simulate_candidate_profile(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -507,38 +702,41 @@ def main(argv: list[str] | None = None) -> int:
             entry_file=args.entry_file,
             entry_main_query=args.entry_main_query,
         )
-        print(
+        reporter.success(
             f"Simulated candidate profile with classification={result['assessment']['classification']}, "
             f"generated {len(result['artifacts'])} artifact(s)."
         )
         return 0
 
     if args.command == "grade-profile":
+        emit_command_start(reporter, "grade-profile", profile=args.profile.resolve(), output=args.output.resolve())
         result = grade_profile(
             profile_path=args.profile.resolve(),
             validation_report_path=args.report.resolve(),
             output_dir=args.output.resolve(),
         )
         payload = result["grade_payload"]
-        print(
+        reporter.success(
             f"Graded profile status={payload['current_status']} -> {payload['suggested_status']}, "
             f"readiness={payload['promotion_readiness']}, generated {len(result['artifacts'])} artifact(s)."
         )
         return 0
 
     if args.command == "promote-profile":
+        emit_command_start(reporter, "promote-profile", output=args.output.resolve())
         profile = promote_profile(
             profile_path=args.profile.resolve(),
             grade_report_path=args.grade_report.resolve(),
             output_path=args.output.resolve(),
             profile_name=args.profile_name,
         )
-        print(
+        reporter.success(
             f"Promoted profile to status={profile.profile_status} with {len(profile.validation_history)} validation record(s)."
         )
         return 0
 
     if args.command == "rollback-profile":
+        emit_command_start(reporter, "rollback-profile", output=args.output.resolve())
         profile = rollback_profile(
             profile_path=args.profile.resolve(),
             output_path=args.output.resolve(),
@@ -546,12 +744,13 @@ def main(argv: list[str] | None = None) -> int:
             reason=args.reason,
             profile_name=args.profile_name,
         )
-        print(
+        reporter.success(
             f"Rolled back profile to status={profile.profile_status} with {len(profile.lifecycle_history)} lifecycle event(s)."
         )
         return 0
 
     if args.command == "compile-context":
+        emit_command_start(reporter, "compile-context", cluster=args.cluster, phase=args.phase)
         analysis_root = args.analysis_root.resolve()
         budget = phase_budget_for(args.prompt_profile, args.phase)
         pack = compile_context_pack_from_analysis(
@@ -561,7 +760,7 @@ def main(argv: list[str] | None = None) -> int:
             prompt_profile=args.prompt_profile,
         )
         paths = write_context_pack(analysis_root.parent if analysis_root.name == "analysis" else analysis_root, pack)
-        print(
+        reporter.success(
             f"Compiled context pack for cluster={args.cluster} phase={args.phase} "
             f"estimated_tokens={pack.estimated_tokens}/{budget['usable_input_limit']} "
             f"generated {len(paths)} artifact(s)."
@@ -569,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run-agent-loop":
+        emit_command_start(reporter, "run-agent-loop", input=args.input.resolve(), output=args.output.resolve())
         config = LoopConfig(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -588,14 +788,16 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             cline_bridge_command=args.cline_bridge_command,
         )
-        payload = run_agent_loop(config)
-        print(
-            f"Agent loop finished with status={payload['status']} stop_reason={payload['stop_reason'] or 'n/a'} "
-            f"iterations={payload['iterations']} missing_artifacts={len(payload['missing_artifacts'])}."
+        payload = run_agent_loop(config, reporter=reporter)
+        return summarize_loop_result(
+            reporter,
+            label="Agent loop",
+            payload=payload,
+            completion_path=args.output.resolve() / "analysis" / "agent_loop" / "completion_report.md",
         )
-        return 0
 
     if args.command == "resume-agent-loop":
+        emit_command_start(reporter, "resume-agent-loop", output=args.output.resolve())
         payload = resume_agent_loop(
             output_dir=args.output.resolve(),
             config=LoopConfig.from_dict(
@@ -619,22 +821,25 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 }
             ),
+            reporter=reporter,
         )
-        print(
-            f"Resumed agent loop with status={payload['status']} stop_reason={payload['stop_reason'] or 'n/a'} "
-            f"iterations={payload['iterations']} missing_artifacts={len(payload['missing_artifacts'])}."
+        return summarize_loop_result(
+            reporter,
+            label="Agent loop",
+            payload=payload,
+            completion_path=args.output.resolve() / "analysis" / "agent_loop" / "completion_report.md",
         )
-        return 0
 
     if args.command == "inspect-agent-loop":
         payload = inspect_agent_loop(args.output.resolve())
-        print(
+        reporter.success(
             f"Loop status={payload['state']['status']} current_phase={payload['state']['current_phase']} "
             f"history_events={payload['history_count']}."
         )
         return 0
 
     if args.command == "prepare-java-bff":
+        emit_command_start(reporter, "prepare-java-bff", input=args.input.resolve(), output=args.output.resolve())
         payload = prepare_java_bff_from_input(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -644,7 +849,7 @@ def main(argv: list[str] | None = None) -> int:
             prompt_profile=args.prompt_profile,
             max_sql_chunk_tokens=args.max_sql_chunk_tokens,
         )
-        print(
+        reporter.success(
             f"Prepared Java BFF artifacts with bundles={payload['summary']['bundle_count']} "
             f"chunks={payload['summary']['chunk_count']} prompts={payload['summary']['prompt_count']} "
             f"chunk_token_limit={payload['summary']['chunk_token_limit']}."
@@ -652,6 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "compile-java-bff-context":
+        emit_command_start(reporter, "compile-java-bff-context", prompt=args.prompt_json.resolve())
         pack = compile_java_bff_context_pack(
             analysis_root=args.analysis_root.resolve(),
             phase_pack_path=args.prompt_json.resolve(),
@@ -659,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
             max_input_tokens=args.max_input_tokens,
         )
         paths = write_java_bff_context_pack(args.analysis_root.resolve(), pack)
-        print(
+        reporter.success(
             f"Compiled Java BFF context for phase={pack['phase']} bundle={pack['bundle_id']} "
             f"estimated_tokens={pack['estimated_prompt_tokens']}/{pack['budget']['usable_input_limit']} "
             f"missing_inputs={len(pack['missing_inputs'])} artifacts={len(paths)}."
@@ -667,6 +873,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "invoke-java-bff":
+        emit_command_start(reporter, "invoke-java-bff", prompt=args.prompt_json.resolve())
         result = invoke_java_bff_prompt(
             analysis_root=args.analysis_root.resolve(),
             prompt_json_path=args.prompt_json.resolve(),
@@ -682,50 +889,54 @@ def main(argv: list[str] | None = None) -> int:
             review=args.review,
         )
         summary = result["run_summary"]
-        print(
+        reporter.success(
             f"Invoked Java BFF provider={summary['provider_name']} phase={summary['phase']} "
             f"bundle={summary['bundle_id']} token_limit={summary['token_limit']}."
         )
         return 0
 
     if args.command == "review-java-bff-response":
+        emit_command_start(reporter, "review-java-bff-response", prompt=args.prompt_json.resolve())
         result = review_java_bff_response_from_analysis(
             analysis_root=args.analysis_root.resolve(),
             prompt_json_path=args.prompt_json.resolve(),
             response_path=args.response.resolve(),
         )
         review = result["review"]
-        print(
+        reporter.success(
             f"Reviewed Java BFF phase={review['phase']} bundle={review['bundle_id']} "
             f"status={review['status']} issues={len(review['issues'])}."
         )
         return 0
 
     if args.command == "merge-java-bff-phases":
+        emit_command_start(reporter, "merge-java-bff-phases", bundle=args.bundle_id)
         result = merge_java_bff_phases(
             analysis_root=args.analysis_root.resolve(),
             bundle_id=args.bundle_id,
         )
         payload = result["implementation_plan"]
-        print(
+        reporter.success(
             f"Merged Java BFF bundle={payload['bundle_id']} status={payload['status']} "
             f"repository_queries={len(payload['repository_plan']['queries'])}."
         )
         return 0
 
     if args.command == "generate-java-bff-skeleton":
+        emit_command_start(reporter, "generate-java-bff-skeleton", bundle=args.bundle_id)
         result = generate_java_bff_skeleton(
             analysis_root=args.analysis_root.resolve(),
             bundle_id=args.bundle_id,
             package_name=args.package_name,
         )
-        print(
+        reporter.success(
             f"Generated Java BFF skeleton for bundle={args.bundle_id} "
             f"artifact_count={len(result['artifacts'])}."
         )
         return 0
 
     if args.command == "run-java-bff-loop":
+        emit_command_start(reporter, "run-java-bff-loop", input=args.input.resolve(), output=args.output.resolve())
         config = JavaBffLoopConfig(
             input_dir=args.input.resolve(),
             output_dir=args.output.resolve(),
@@ -749,14 +960,16 @@ def main(argv: list[str] | None = None) -> int:
             entry_main_query=args.entry_main_query,
             max_sql_chunk_tokens=args.max_sql_chunk_tokens,
         )
-        payload = run_java_bff_loop(config)
-        print(
-            f"Java BFF loop finished with status={payload['status']} stop_reason={payload['stop_reason']} "
-            f"missing_artifacts={len(payload['missing_artifacts'])}."
+        payload = run_java_bff_loop(config, reporter=reporter)
+        return summarize_loop_result(
+            reporter,
+            label="Java BFF loop",
+            payload=payload,
+            completion_path=args.output.resolve() / "analysis" / "java_bff" / "loop" / "completion_report.md",
         )
-        return 0
 
     if args.command == "resume-java-bff-loop":
+        emit_command_start(reporter, "resume-java-bff-loop", output=args.output.resolve())
         inspection = inspect_java_bff_loop(args.output.resolve())
         base_config = JavaBffLoopConfig.from_dict(inspection["state"]["config"])
         if args.provider_config:
@@ -781,19 +994,31 @@ def main(argv: list[str] | None = None) -> int:
             base_config.cline_bridge_command = args.cline_bridge_command
         if args.package_name is not None:
             base_config.package_name = args.package_name
-        payload = resume_java_bff_loop(args.output.resolve(), config=base_config)
-        print(
-            f"Resumed Java BFF loop with status={payload['status']} stop_reason={payload['stop_reason']} "
-            f"missing_artifacts={len(payload['missing_artifacts'])}."
+        payload = resume_java_bff_loop(args.output.resolve(), config=base_config, reporter=reporter)
+        return summarize_loop_result(
+            reporter,
+            label="Java BFF loop",
+            payload=payload,
+            completion_path=args.output.resolve() / "analysis" / "java_bff" / "loop" / "completion_report.md",
         )
-        return 0
 
     if args.command == "inspect-java-bff-loop":
         payload = inspect_java_bff_loop(args.output.resolve())
-        print(
+        reporter.success(
             f"Java BFF loop status={payload['state']['status']} "
             f"history_events={payload['history_count']}."
         )
         return 0
 
     parser.error(f"Unsupported command: {args.command}")
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    reporter = build_reporter(args)
+    try:
+        return dispatch_command(args, parser, reporter)
+    except Exception as exc:  # noqa: BLE001
+        return handle_cli_exception(args, reporter, exc)

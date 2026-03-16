@@ -24,9 +24,10 @@ from .phase_engine import (
 from .schemas import LoopConfig, LoopState
 
 
-def run_agent_loop(config: LoopConfig, runner: Any | None = None) -> dict[str, Any]:
+def run_agent_loop(config: LoopConfig, runner: Any | None = None, reporter: Any | None = None) -> dict[str, Any]:
     state = build_initial_state(config)
     state_path = persist_loop_state(config.output_dir, state)
+    notify_progress(reporter, "agent-loop", "started", run_id=state.run_id, output=config.output_dir.resolve())
     append_phase_history(
         config.output_dir,
         {
@@ -36,13 +37,14 @@ def run_agent_loop(config: LoopConfig, runner: Any | None = None) -> dict[str, A
             "state_path": str(state_path),
         },
     )
-    return _run_loop(config, state, runner=runner)
+    return _run_loop(config, state, runner=runner, reporter=reporter)
 
 
-def resume_agent_loop(output_dir: Path, config: LoopConfig | None = None, runner: Any | None = None) -> dict[str, Any]:
+def resume_agent_loop(output_dir: Path, config: LoopConfig | None = None, runner: Any | None = None, reporter: Any | None = None) -> dict[str, Any]:
     state = load_loop_state(output_dir)
     resolved_config = config or LoopConfig.from_dict(state.config)
-    return _run_loop(resolved_config, state, runner=runner)
+    notify_progress(reporter, "agent-loop", "resumed", run_id=state.run_id, output=output_dir.resolve())
+    return _run_loop(resolved_config, state, runner=runner, reporter=reporter)
 
 
 def inspect_agent_loop(output_dir: Path) -> dict[str, Any]:
@@ -60,31 +62,43 @@ def inspect_agent_loop(output_dir: Path) -> dict[str, Any]:
     return payload
 
 
-def _run_loop(config: LoopConfig, state: LoopState, runner: Any | None = None) -> dict[str, Any]:
+def _run_loop(config: LoopConfig, state: LoopState, runner: Any | None = None, reporter: Any | None = None) -> dict[str, Any]:
     output_dir = config.output_dir.resolve()
     analysis_root = output_dir / "analysis"
     active_runner = runner or build_runner(config)
 
     while True:
         state.current_phase = select_next_phase(state)
+        notify_progress(
+            reporter,
+            "agent-loop",
+            "phase-start",
+            iteration=state.iteration_count + 1,
+            phase=state.current_phase,
+            pending_clusters=len(state.pending_clusters),
+        )
         stop, reason = should_stop(state, output_dir, config.max_iterations)
         if stop:
             state.status = "completed" if reason == "all_required_artifacts_completed" else "stopped"
             state.stop_reason = reason
             persist_loop_state(output_dir, state)
+            if state.status == "completed":
+                notify_success(reporter, "Agent loop completed.", stop_reason=reason, iterations=state.iteration_count)
+            else:
+                notify_warning(reporter, "Agent loop stopped.", stop_reason=reason, iterations=state.iteration_count)
             return write_completion_report(output_dir, state)
 
         try:
             if state.current_phase == "scan":
-                handle_scan_phase(config, state)
+                handle_scan_phase(config, state, reporter=reporter)
             elif state.current_phase in CLUSTER_PHASES:
-                handle_cluster_phase(config, state, active_runner, analysis_root)
+                handle_cluster_phase(config, state, active_runner, analysis_root, reporter=reporter)
             elif state.current_phase == "simulate":
-                handle_simulate_phase(config, state)
+                handle_simulate_phase(config, state, reporter=reporter)
             elif state.current_phase == "grade":
-                handle_grade_phase(config, state)
+                handle_grade_phase(config, state, reporter=reporter)
             elif state.current_phase == "package":
-                handle_package_phase(config, state)
+                handle_package_phase(config, state, reporter=reporter)
             else:
                 state.stop_reason = f"unsupported_phase:{state.current_phase}"
                 state.status = "failed"
@@ -93,8 +107,16 @@ def _run_loop(config: LoopConfig, state: LoopState, runner: Any | None = None) -
             state.stop_reason = "phase_execution_failed"
             state.last_error = {
                 "phase": state.current_phase,
+                "type": type(exc).__name__,
                 "message": str(exc),
             }
+            notify_error(
+                reporter,
+                "Agent loop phase failed.",
+                phase=state.current_phase,
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
             append_phase_history(
                 output_dir,
                 {
@@ -111,8 +133,9 @@ def _run_loop(config: LoopConfig, state: LoopState, runner: Any | None = None) -
         persist_loop_state(output_dir, state)
 
 
-def handle_scan_phase(config: LoopConfig, state: LoopState) -> None:
+def handle_scan_phase(config: LoopConfig, state: LoopState, reporter: Any | None = None) -> None:
     output_dir = config.output_dir.resolve()
+    notify_progress(reporter, "agent-loop", "scan", input=config.input_dir.resolve(), output=output_dir)
     result = analyze_directory(
         input_dir=config.input_dir.resolve(),
         output_dir=output_dir,
@@ -145,11 +168,28 @@ def handle_scan_phase(config: LoopConfig, state: LoopState) -> None:
             "cluster_count": len(state.pending_clusters),
         },
     )
+    notify_progress(
+        reporter,
+        "agent-loop",
+        "scan-complete",
+        clusters=len(state.pending_clusters),
+        queries=len(result.queries),
+        diagnostics=len(result.diagnostics),
+    )
 
 
-def handle_cluster_phase(config: LoopConfig, state: LoopState, runner: Any, analysis_root: Path) -> None:
+def handle_cluster_phase(config: LoopConfig, state: LoopState, runner: Any, analysis_root: Path, reporter: Any | None = None) -> None:
     output_dir = config.output_dir.resolve()
     task = build_phase_task(state, config, analysis_root)
+    notify_progress(
+        reporter,
+        "agent-loop",
+        "task-start",
+        phase=task.phase,
+        cluster=task.cluster_id,
+        attempt=task.attempt,
+        task_id=task.task_id,
+    )
     register_task_attempt(state, task.cluster_id or "global", task.phase)
     state.active_task_id = task.task_id
     prior_response = None
@@ -181,6 +221,15 @@ def handle_cluster_phase(config: LoopConfig, state: LoopState, runner: Any, anal
         profile_path=config.profile_path.resolve() if config.profile_path else None,
     )
     review = review_result["review"]
+    notify_progress(
+        reporter,
+        "agent-loop",
+        "task-reviewed",
+        phase=task.phase,
+        cluster=task.cluster_id,
+        status=review["status"],
+        issues=len(review.get("issues", [])),
+    )
 
     latest_cluster_output = state.latest_outputs.setdefault(task.cluster_id or "", {})
     latest_cluster_output[task.phase] = {
@@ -218,6 +267,13 @@ def handle_cluster_phase(config: LoopConfig, state: LoopState, runner: Any, anal
             mark_artifact_completion(state, "analysis/llm_reviews")
             state.current_phase = task.phase
             state.active_task_id = None
+            notify_warning(
+                reporter,
+                "Cluster phase needs another attempt.",
+                phase=task.phase,
+                cluster=task.cluster_id,
+                attempt=task.attempt,
+            )
 
     append_phase_history(
         output_dir,
@@ -234,8 +290,9 @@ def handle_cluster_phase(config: LoopConfig, state: LoopState, runner: Any, anal
     )
 
 
-def handle_simulate_phase(config: LoopConfig, state: LoopState) -> None:
+def handle_simulate_phase(config: LoopConfig, state: LoopState, reporter: Any | None = None) -> None:
     output_dir = config.output_dir.resolve()
+    notify_progress(reporter, "agent-loop", "simulate", output=output_dir)
     proposal_result = propose_rules_from_analysis(
         analysis_root=output_dir,
         profile_path=config.profile_path.resolve() if config.profile_path else None,
@@ -267,10 +324,18 @@ def handle_simulate_phase(config: LoopConfig, state: LoopState) -> None:
             "status": simulation_result["assessment"]["classification"],
         },
     )
+    notify_progress(
+        reporter,
+        "agent-loop",
+        "simulate-complete",
+        accepted_patches=proposal_result["proposal_payload"]["summary"]["accepted_patch_count"],
+        classification=simulation_result["assessment"]["classification"],
+    )
 
 
-def handle_grade_phase(config: LoopConfig, state: LoopState) -> None:
+def handle_grade_phase(config: LoopConfig, state: LoopState, reporter: Any | None = None) -> None:
     output_dir = config.output_dir.resolve()
+    notify_progress(reporter, "agent-loop", "grade", output=output_dir)
     candidate_profile_path = output_dir / "analysis" / "proposals" / "candidate_profile.json"
     result = grade_profile(
         profile_path=candidate_profile_path,
@@ -292,10 +357,18 @@ def handle_grade_phase(config: LoopConfig, state: LoopState) -> None:
             "readiness": result["grade_payload"]["promotion_readiness"],
         },
     )
+    notify_progress(
+        reporter,
+        "agent-loop",
+        "grade-complete",
+        suggested_status=result["grade_payload"]["suggested_status"],
+        readiness=result["grade_payload"]["promotion_readiness"],
+    )
 
 
-def handle_package_phase(config: LoopConfig, state: LoopState) -> None:
+def handle_package_phase(config: LoopConfig, state: LoopState, reporter: Any | None = None) -> None:
     output_dir = config.output_dir.resolve()
+    notify_progress(reporter, "agent-loop", "package", output=output_dir)
     write_evolution_report(output_dir)
     apply_phase_status(
         state,
@@ -317,6 +390,7 @@ def handle_package_phase(config: LoopConfig, state: LoopState) -> None:
             "status": "completed",
         },
     )
+    notify_progress(reporter, "agent-loop", "package-complete", output=output_dir)
 
 
 def build_runner(config: LoopConfig) -> Any:
@@ -434,3 +508,38 @@ def remaining_cluster_phases(start_phase: str) -> list[str]:
         return []
     index = CLUSTER_PHASES.index(start_phase)
     return CLUSTER_PHASES[index:]
+
+
+def notify_progress(reporter: Any | None, label: str, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    progress = getattr(reporter, "progress", None)
+    if callable(progress):
+        progress(label, message, **fields)
+
+
+def notify_warning(reporter: Any | None, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    warning = getattr(reporter, "warning", None)
+    if callable(warning):
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+        warning(f"{message} {details}".strip())
+
+
+def notify_error(reporter: Any | None, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    error = getattr(reporter, "error", None)
+    if callable(error):
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+        error(f"{message} {details}".strip())
+
+
+def notify_success(reporter: Any | None, message: str, **fields: Any) -> None:
+    if reporter is None:
+        return
+    success = getattr(reporter, "success", None)
+    if callable(success):
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value is not None)
+        success(f"{message} {details}".strip())
