@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.19.0 - 2026-03-16
+
+- Added `doctor-run` so an analysis output can now be diagnosed into provider, loop, failure, and next-command recommendations without manual artifact hunting.
+- Added `watch-and-review` so saved Cline or provider responses can be watched, reviewed automatically, and turned into repair handoff packs when needed.
+- Added `compile-adaptive-context` and `shrink-prompt` so weaker company models can be retried with smaller prompt/context variants instead of reassembling prompts by hand.
+- Added `analysis/operator_console.html`, a single-page operator view for loop state, doctor guidance, recent handoff packs, and recommended commands.
+- Extended Java BFF skeleton generation to emit a starter Spring Boot project scaffold with `pom.xml`, `application.yml`, SQL resource placeholders, verification checklists, and merge-guard artifacts.
+- Extended Java BFF loop completion so starter-project manifests, verification checklists, and merge-guard artifacts are part of the ready-to-handoff output set.
+- Added tests covering doctor-run, adaptive prompt generation, watch-and-review, and starter project artifacts.
+
 ## 1.15.0 - 2026-03-16
 
 - Added weak-model response normalization for generic and Java BFF reviews, including fenced JSON cleanup, noisy wrapper trimming, Python-literal parsing, Cline JSON event extraction, and saved normalization artifacts.

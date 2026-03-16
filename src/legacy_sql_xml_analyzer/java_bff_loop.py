@@ -454,11 +454,28 @@ def refresh_completion_state(analysis_root: Path, state: dict[str, Any]) -> None
             if isinstance(merged_payload, dict) and bool(merged_payload.get("completion", {}).get("ready_for_skeletons")):
                 manifest_json = java_root / "skeletons" / slug / "manifest.json"
                 readme_md = java_root / "skeletons" / slug / "README.md"
-                required.extend([str(manifest_json.resolve()), str(readme_md.resolve())])
+                starter_manifest = java_root / "skeletons" / slug / "starter_project" / "manifest.json"
+                starter_checklist = java_root / "skeletons" / slug / "starter_project" / "verification_checklist.json"
+                starter_guard = java_root / "skeletons" / slug / "starter_project" / "merge_guard.json"
+                required.extend(
+                    [
+                        str(manifest_json.resolve()),
+                        str(readme_md.resolve()),
+                        str(starter_manifest.resolve()),
+                        str(starter_checklist.resolve()),
+                        str(starter_guard.resolve()),
+                    ]
+                )
                 if manifest_json.exists():
                     completed.append(str(manifest_json.resolve()))
                 if readme_md.exists():
                     completed.append(str(readme_md.resolve()))
+                if starter_manifest.exists():
+                    completed.append(str(starter_manifest.resolve()))
+                if starter_checklist.exists():
+                    completed.append(str(starter_checklist.resolve()))
+                if starter_guard.exists():
+                    completed.append(str(starter_guard.resolve()))
 
     unique_required = list(dict.fromkeys(required))
     unique_completed = list(dict.fromkeys(path for path in completed if path in set(unique_required)))

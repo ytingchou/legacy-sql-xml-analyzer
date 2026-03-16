@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .doctor import doctor_run
 from .failure_explainer import explain_failure_from_output_dir
 from .learning import load_profile
 from .models import AnalysisResult, ArtifactDescriptor, ResolvedQueryModel
@@ -432,6 +433,7 @@ def write_evolution_report(
     html_path = analysis_root / "evolution_console.html"
     prompt_lab_path = analysis_root / "prompt_lab.html"
     failure_console_path = analysis_root / "failure_console.html"
+    operator_console_path = analysis_root / "operator_console.html"
     json_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_evolution_summary_markdown(summary), encoding="utf-8")
     scoreboard_json_path.write_text(
@@ -462,6 +464,18 @@ def write_evolution_report(
     prompt_lab_path.write_text(render_prompt_lab_html(prompt_lab_summary), encoding="utf-8")
     failure_payload = explain_failure_from_output_dir(output_dir)
     failure_console_path.write_text(render_failure_console_html(failure_payload["index"]), encoding="utf-8")
+    doctor_payload = doctor_run(output_dir)
+    operator_console_path.write_text(
+        render_operator_console_html(
+            build_operator_console_summary(
+                output_dir=output_dir,
+                prompt_lab_summary=prompt_lab_summary,
+                failure_payload=failure_payload["index"],
+                doctor_payload=doctor_payload,
+            )
+        ),
+        encoding="utf-8",
+    )
     return [
         artifact_descriptor_for_path(json_path, "json", "Evolution summary", "prompting"),
         artifact_descriptor_for_path(md_path, "markdown", "Evolution summary (Markdown)", "prompting"),
@@ -470,6 +484,7 @@ def write_evolution_report(
         artifact_descriptor_for_path(html_path, "html", "Evolution console", "prompting"),
         artifact_descriptor_for_path(prompt_lab_path, "html", "Prompt lab", "prompting"),
         artifact_descriptor_for_path(failure_console_path, "html", "Failure console", "prompting"),
+        artifact_descriptor_for_path(operator_console_path, "html", "Operator console", "prompting"),
     ]
 
 
@@ -653,6 +668,95 @@ def render_failure_console_html(payload: dict[str, Any]) -> str:
     <thead><tr><th>Code</th><th>Summary</th><th>Next Step</th><th>Recommended Command</th></tr></thead>
     <tbody>{rows or '<tr><td colspan="4">No failure explanations yet</td></tr>'}</tbody>
   </table>
+</body>
+</html>
+"""
+
+
+def build_operator_console_summary(
+    *,
+    output_dir: Path,
+    prompt_lab_summary: dict[str, Any],
+    failure_payload: dict[str, Any],
+    doctor_payload: dict[str, Any],
+) -> dict[str, Any]:
+    analysis_root = output_dir / "analysis"
+    generic_loop = load_json_payload(analysis_root / "agent_loop" / "completion_report.json")
+    java_loop = load_json_payload(analysis_root / "java_bff" / "loop" / "completion_report.json")
+    latest_handoff = sorted((analysis_root / "handoff").glob("*/pack.json"))
+    handoff_rows = []
+    for path in latest_handoff[-10:]:
+        payload = load_json_payload(path)
+        if payload:
+            handoff_rows.append(
+                {
+                    "title": payload.get("title"),
+                    "profile": payload.get("profile_name"),
+                    "path": str(path.resolve()),
+                }
+            )
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "doctor_status": doctor_payload.get("status"),
+        "generic_loop": generic_loop or {},
+        "java_loop": java_loop or {},
+        "recommended_actions": doctor_payload.get("recommended_actions", []),
+        "failure_count": failure_payload.get("count", 0),
+        "generic_pack_count": prompt_lab_summary.get("generic_pack_count", 0),
+        "java_pack_count": prompt_lab_summary.get("java_pack_count", 0),
+        "handoff_pack_count": prompt_lab_summary.get("handoff_pack_count", 0),
+        "handoff_rows": handoff_rows,
+    }
+
+
+def render_operator_console_html(summary: dict[str, Any]) -> str:
+    action_rows = "".join(
+        f"<tr><td>{escape_html(str(item['category']))}</td><td>{escape_html(str(item['summary']))}</td>"
+        f"<td><code>{escape_html(str(item['command']))}</code></td></tr>"
+        for item in summary.get("recommended_actions", [])
+    )
+    handoff_rows = "".join(
+        f"<tr><td>{escape_html(str(item['title']))}</td><td>{escape_html(str(item['profile']))}</td>"
+        f"<td>{escape_html(str(item['path']))}</td></tr>"
+        for item in summary.get("handoff_rows", [])
+    )
+    generic_loop = summary.get("generic_loop", {})
+    java_loop = summary.get("java_loop", {})
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Operator Console</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; color: #12212e; background: #f6f7f8; }}
+    .grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 16px 0 24px; }}
+    .card {{ background: #fff; border: 1px solid #d9dee3; border-radius: 12px; padding: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 20px; }}
+    th, td {{ border-bottom: 1px solid #e6eaee; text-align: left; padding: 10px; vertical-align: top; }}
+    th {{ background: #eef3f6; }}
+    code {{ font-family: ui-monospace, SFMono-Regular, monospace; }}
+  </style>
+</head>
+<body>
+  <h1>Operator Console</h1>
+  <p>Single page status view for loops, doctor-run guidance, handoff packs, and next commands.</p>
+  <div class="grid">
+    <div class="card"><strong>{escape_html(str(summary['doctor_status']))}</strong><div>Doctor Status</div></div>
+    <div class="card"><strong>{escape_html(str(generic_loop.get('status') or 'missing'))}</strong><div>Generic Loop</div></div>
+    <div class="card"><strong>{escape_html(str(java_loop.get('status') or 'missing'))}</strong><div>Java BFF Loop</div></div>
+    <div class="card"><strong>{summary['failure_count']}</strong><div>Failure Explanations</div></div>
+  </div>
+  <div class="grid">
+    <div class="card"><strong>{summary['generic_pack_count']}</strong><div>Generic Context Packs</div></div>
+    <div class="card"><strong>{summary['java_pack_count']}</strong><div>Java Context Packs</div></div>
+    <div class="card"><strong>{summary['handoff_pack_count']}</strong><div>Handoff Packs</div></div>
+    <div class="card"><strong>{len(summary.get('recommended_actions', []))}</strong><div>Recommended Actions</div></div>
+  </div>
+  <h2>Recommended Actions</h2>
+  <table><thead><tr><th>Category</th><th>Summary</th><th>Command</th></tr></thead><tbody>{action_rows or '<tr><td colspan="3">No actions</td></tr>'}</tbody></table>
+  <h2>Recent Handoff Packs</h2>
+  <table><thead><tr><th>Title</th><th>Profile</th><th>Path</th></tr></thead><tbody>{handoff_rows or '<tr><td colspan="3">No handoff packs</td></tr>'}</tbody></table>
+  <div><a href="dashboard.html">Dashboard</a> · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a> · <a href="evolution_console.html">Evolution Console</a></div>
 </body>
 </html>
 """
@@ -1447,7 +1551,7 @@ def render_dashboard_html(summary: dict[str, Any]) -> str:
           <div class="metric"><strong>{evolution['headline']['accepted_reviews']}</strong><span>Accepted</span></div>
           <div class="metric"><strong>{evolution['headline']['accepted_patch_count']}</strong><span>Patches</span></div>
         </div>
-        <div class="footer"><a href="evolution_console.html">Open evolution console</a> · <a href="prompt_lab.html">Open prompt lab</a> · <a href="failure_console.html">Open failure console</a></div>
+        <div class="footer"><a href="evolution_console.html">Open evolution console</a> · <a href="prompt_lab.html">Open prompt lab</a> · <a href="failure_console.html">Open failure console</a> · <a href="operator_console.html">Open operator console</a></div>
       </div>
       <div class="panel">
         <h2>Provider Scoreboard</h2>
@@ -1741,7 +1845,7 @@ def render_evolution_console_html(summary: dict[str, Any]) -> str:
         </thead>
         <tbody>{cluster_rows or '<tr><td colspan=\"7\">No cluster activity yet</td></tr>'}</tbody>
       </table>
-      <div class="footer">Generated at {escape_html(summary['generated_at'])} · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a></div>
+      <div class="footer">Generated at {escape_html(summary['generated_at'])} · <a href="prompt_lab.html">Prompt Lab</a> · <a href="failure_console.html">Failure Console</a> · <a href="operator_console.html">Operator Console</a></div>
     </section>
   </div>
 </body>

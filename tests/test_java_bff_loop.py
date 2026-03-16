@@ -120,8 +120,10 @@ order by o.order_id desc
             self.assertGreaterEqual(inspection["history_count"], 1)
             completion_path = output_dir / "analysis" / "java_bff" / "loop" / "completion_report.json"
             skeleton_readme = output_dir / "analysis" / "java_bff" / "skeletons" / safe_name(bundle_id) / "README.md"
+            starter_manifest = output_dir / "analysis" / "java_bff" / "skeletons" / safe_name(bundle_id) / "starter_project" / "manifest.json"
             self.assertTrue(completion_path.exists())
             self.assertTrue(skeleton_readme.exists())
+            self.assertTrue(starter_manifest.exists())
 
 
 if __name__ == "__main__":

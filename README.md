@@ -4,7 +4,7 @@ Analyze legacy SQL XML mapping files, resolve cross-query references, lint Delph
 
 The tool also supports a self-calibration flow for environments where real XML samples cannot leave the company boundary: observe real XML shapes, infer a reusable rule profile, freeze it, and then analyze with that profile.
 
-Current local release: `v1.15.0`
+Current local release: `v1.19.0`
 
 Quick start guides:
 
@@ -29,8 +29,11 @@ Useful commands:
 
 ```bash
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer explain-failure --output ./analysis-output
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer doctor-run --output ./analysis-output
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer emit-company-prompt --analysis-root ./analysis-output --cluster reference_target_missing --stage propose
 PYTHONPATH=src python3 -m legacy_sql_xml_analyzer export-vscode-cline-pack --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer compile-adaptive-context --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer watch-and-review --analysis-root ./analysis-output --prompt-json ./analysis-output/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json --response ./phase.response.json
 ```
 
 New operator-facing artifacts:
@@ -39,6 +42,9 @@ New operator-facing artifacts:
 - `analysis/handoff/*`: copy-ready packs for Cline CLI or VS Code Cline, including `prompt.txt`, `schema.json`, and `response_template.json`
 - `analysis/prompt_lab.html`: web view for prompt/context packs and token budgets
 - `analysis/failure_console.html`: web view for failure explanations and troubleshooting
+- `analysis/operator_console.html`: single-page operator view for loops, doctor guidance, handoff packs, and next commands
+- `analysis/doctor/doctor_report.json`: machine-readable diagnosis for provider, loop, and failure states
+- `analysis/adaptive_prompts/*`: smaller retry-ready prompt/context variants for weaker models
 
 ## Usage
 
@@ -101,6 +107,11 @@ When `analyze` runs with `--snapshot-label`, it also persists run history:
 - `analysis/schema/artifact_catalog.md`: human-readable artifact contract catalog
 - `analysis/prompt_lab.html`: static prompt lab for context packs, handoff bundles, and token budgets
 - `analysis/failure_console.html`: static failure console for troubleshooting weak-model, bridge, and provider issues
+- `analysis/operator_console.html`: static operator console for loop state, doctor guidance, and recent handoff packs
+- `analysis/doctor/doctor_report.json`: machine-readable doctor report with recommended commands
+- `analysis/doctor/doctor_report.md`: human-readable doctor report
+- `analysis/adaptive_prompts/*.adaptive.json`: multi-budget prompt/context variants for retry cycles
+- `analysis/watch_review/*.json`: automated watch-and-review results with repair-pack references
 - `analysis/failure_explanations/index.json`: aggregated actionable failure explanations
 - `analysis/failure_explanations/*.md`: per-failure troubleshooting cards with recommended commands and company-LLM prompts
 - `analysis/handoff/*/pack.json`: Cline / VS Code handoff pack metadata
@@ -364,6 +375,9 @@ The Java BFF loop adds:
 - `analysis/java_bff/merged/*/implementation_plan.json`: merged repository, BFF, and verification logic
 - `analysis/java_bff/skeletons/*/manifest.json`: emitted Java file manifest
 - `analysis/java_bff/skeletons/*/README.md`: handoff readme for the generated skeleton bundle
+- `analysis/java_bff/skeletons/*/starter_project/manifest.json`: starter Spring Boot project manifest
+- `analysis/java_bff/skeletons/*/starter_project/verification_checklist.json`: implementation verification checklist
+- `analysis/java_bff/skeletons/*/starter_project/merge_guard.json`: merge guard summary before accepting generated starter code
 - `analysis/java_bff/reviews/*/*-normalization.json`: normalization reports for Java BFF phase responses after repairing weak-model output
 - `analysis/java_bff/loop/loop_state.json`: resumable loop state
 - `analysis/java_bff/loop/completion_report.json`: final status with missing artifact tracking

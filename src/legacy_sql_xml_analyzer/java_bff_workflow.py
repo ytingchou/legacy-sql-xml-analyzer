@@ -77,3 +77,15 @@ def generate_java_bff_skeleton(
         base_package=package_name,
     )
     return result
+
+
+def generate_java_bff_starter(
+    analysis_root: Path,
+    bundle_id: str,
+    package_name: str = "com.example.legacybff",
+) -> dict[str, Any]:
+    return generate_java_bff_skeleton(
+        analysis_root=analysis_root,
+        bundle_id=bundle_id,
+        package_name=package_name,
+    )

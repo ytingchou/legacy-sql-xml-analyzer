@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import sys
 from pathlib import Path
 
 from .agent_loop import inspect_agent_loop, resume_agent_loop, run_agent_loop
+from .adaptive_prompt import (
+    compile_adaptive_generic_context,
+    compile_adaptive_java_context,
+    shrink_prompt_text,
+    write_adaptive_payload,
+)
 from .analyzer import analyze_directory
 from .cline_bridge import COMMAND_PROFILES
 from .console import ConsoleReporter
 from .context_compiler import compile_context_pack_from_analysis, write_context_pack
+from .doctor import doctor_run
 from .evolution import (
     apply_profile_patch_bundle,
     propose_rules_from_analysis,
@@ -28,6 +36,7 @@ from .java_bff_loop import (
 )
 from .java_bff_workflow import (
     generate_java_bff_skeleton,
+    generate_java_bff_starter,
     invoke_java_bff_prompt,
     merge_java_bff_phases,
     review_java_bff_response_from_analysis,
@@ -36,9 +45,10 @@ from .lifecycle import grade_profile, promote_profile, rollback_profile
 from .llm_provider import LlmProviderError, invoke_llm_from_analysis, validate_provider_connection
 from .learning import freeze_profile, infer_rules, learn_directory
 from .prompt_profiles import phase_budget_for
-from .prompting import prepare_prompt_pack_from_analysis
+from .prompting import prepare_prompt_pack_from_analysis, resolve_analysis_root
 from .schemas import LoopConfig
 from .validation import validate_profile
+from .watch_review import watch_and_review
 from .web import serve_report
 
 
@@ -319,6 +329,44 @@ def build_parser() -> argparse.ArgumentParser:
     export_handoff_parser.add_argument("--profile-name", default="company-qwen3-java-phase", help="Company weak-model prompt profile.")
     export_handoff_parser.add_argument("--output-dir", type=Path, help="Optional output directory for the generated handoff pack.")
 
+    doctor_parser = subparsers.add_parser(
+        "doctor-run",
+        help="Inspect an analysis output directory and generate actionable operator guidance.",
+    )
+    doctor_parser.add_argument("--output", required=True, type=Path, help="Output directory that contains analysis artifacts.")
+
+    watch_review_parser = subparsers.add_parser(
+        "watch-and-review",
+        help="Watch for a response file, review it automatically, and optionally emit a repair handoff pack.",
+    )
+    watch_review_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    watch_review_parser.add_argument("--response", required=True, type=Path, help="Response file to wait for and review.")
+    watch_review_parser.add_argument("--cluster", help="Generic cluster_id.")
+    watch_review_parser.add_argument("--stage", choices=["classify", "propose", "verify"], help="Generic stage when --cluster is used.")
+    watch_review_parser.add_argument("--prompt-json", type=Path, help="Java BFF phase prompt JSON path.")
+    watch_review_parser.add_argument("--timeout-seconds", type=float, default=300.0, help="Maximum time to wait for the response file.")
+    watch_review_parser.add_argument("--poll-seconds", type=float, default=2.0, help="Polling interval while waiting for the response file.")
+    watch_review_parser.add_argument("--no-repair-pack", action="store_true", help="Do not emit a repair handoff pack when review fails.")
+
+    adaptive_context_parser = subparsers.add_parser(
+        "compile-adaptive-context",
+        help="Generate multiple token-budgeted context variants for a generic cluster or Java BFF phase pack.",
+    )
+    adaptive_context_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    adaptive_context_parser.add_argument("--cluster", help="Generic cluster_id.")
+    adaptive_context_parser.add_argument("--stage", choices=["classify", "propose", "verify"], help="Generic stage when --cluster is used.")
+    adaptive_context_parser.add_argument("--prompt-json", type=Path, help="Java BFF phase prompt JSON path.")
+    adaptive_context_parser.add_argument("--prompt-profile", default="qwen3-128k-autonomous", help="Prompt profile for generic adaptive variants.")
+    adaptive_context_parser.add_argument("--targets", default="8000,16000,24000,48000", help="Comma-separated target token budgets.")
+
+    shrink_prompt_parser = subparsers.add_parser(
+        "shrink-prompt",
+        help="Shrink a prompt-bearing JSON artifact to a target token budget.",
+    )
+    shrink_prompt_parser.add_argument("--pack-json", required=True, type=Path, help="JSON artifact that contains prompt_text.")
+    shrink_prompt_parser.add_argument("--target-tokens", required=True, type=int, help="Target prompt token budget.")
+    shrink_prompt_parser.add_argument("--output-dir", type=Path, help="Optional output directory for the shrunken prompt artifact.")
+
     context_parser = subparsers.add_parser(
         "compile-context",
         help="Compile a phase-specific context pack for weak 128k-token models.",
@@ -433,6 +481,14 @@ def build_parser() -> argparse.ArgumentParser:
     skeleton_java_parser.add_argument("--bundle-id", required=True, help="Java BFF bundle id from overview.json.")
     skeleton_java_parser.add_argument("--package-name", default="com.example.legacybff", help="Java package name for generated skeleton files.")
 
+    starter_java_parser = subparsers.add_parser(
+        "generate-java-bff-starter",
+        help="Generate a starter Spring Boot project scaffold, SQL resource placeholders, and verification artifacts for a merged Java BFF bundle.",
+    )
+    starter_java_parser.add_argument("--analysis-root", required=True, type=Path, help="Output directory, analysis directory, or java_bff directory.")
+    starter_java_parser.add_argument("--bundle-id", required=True, help="Java BFF bundle id from overview.json.")
+    starter_java_parser.add_argument("--package-name", default="com.example.legacybff", help="Java package name for generated starter project files.")
+
     java_loop_parser = subparsers.add_parser(
         "run-java-bff-loop",
         help="Run the autonomous Java BFF phase loop until merged plans and skeletons are complete or a stop condition is reached.",
@@ -503,6 +559,10 @@ def build_parser() -> argparse.ArgumentParser:
             emit_company_prompt_parser,
             repair_company_prompt_parser,
             export_handoff_parser,
+            doctor_parser,
+            watch_review_parser,
+            adaptive_context_parser,
+            shrink_prompt_parser,
             context_parser,
             loop_parser,
             resume_parser,
@@ -513,6 +573,7 @@ def build_parser() -> argparse.ArgumentParser:
             review_java_parser,
             merge_java_parser,
             skeleton_java_parser,
+            starter_java_parser,
             java_loop_parser,
             resume_java_loop_parser,
             inspect_java_loop_parser,
@@ -586,6 +647,22 @@ def build_command_artifact_hints(args: argparse.Namespace) -> list[str]:
                 str(output / "analysis" / "java_bff" / "loop" / "completion_report.md"),
             ]
         )
+    if command == "doctor-run" and getattr(args, "output", None):
+        output = args.output.resolve()
+        hints.extend(
+            [
+                str(output / "analysis" / "doctor" / "doctor_report.json"),
+                str(output / "analysis" / "failure_explanations" / "index.md"),
+            ]
+        )
+    if command == "watch-and-review" and getattr(args, "analysis_root", None):
+        analysis_root = resolve_analysis_root(args.analysis_root.resolve())
+        hints.extend(
+            [
+                str(analysis_root / "watch_review"),
+                str(analysis_root / "handoff"),
+            ]
+        )
     if command == "validate-provider" and getattr(args, "output", None):
         output = args.output.resolve()
         hints.append(str(output / "analysis" / "provider_validation"))
@@ -613,6 +690,8 @@ def build_error_hints(args: argparse.Namespace, exc: Exception) -> list[str]:
         hints.append("Use `inspect-agent-loop` after a stopped run to see the latest phase state and history.")
     if command in {"run-java-bff-loop", "resume-java-bff-loop"}:
         hints.append("Use `inspect-java-bff-loop` after a stopped run to inspect the latest prompt, review, and missing artifacts.")
+    if command == "watch-and-review":
+        hints.append("If review fails, inspect the generated repair pack under analysis/handoff and retry the same phase with a smaller context.")
     if not hints:
         hints.append("Inspect the command-specific output artifacts and rerun with `--verbose` for the traceback.")
     return hints
@@ -932,6 +1011,80 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
         )
         return 0
 
+    if args.command == "doctor-run":
+        emit_command_start(reporter, "doctor-run", output=args.output.resolve())
+        payload = doctor_run(args.output.resolve())
+        reporter.success(
+            f"Doctor status={payload['status']} actions={len(payload['recommended_actions'])} report={payload['json_path']}."
+        )
+        return 0
+
+    if args.command == "watch-and-review":
+        emit_command_start(reporter, "watch-and-review", response=args.response.resolve())
+        if args.cluster and not args.stage:
+            raise ValueError("--stage is required when --cluster is used.")
+        payload = watch_and_review(
+            analysis_root=args.analysis_root.resolve(),
+            response_path=args.response.resolve(),
+            cluster_id=args.cluster,
+            stage=args.stage,
+            prompt_json=args.prompt_json.resolve() if args.prompt_json else None,
+            timeout_seconds=args.timeout_seconds,
+            poll_seconds=args.poll_seconds,
+            emit_repair_pack=not args.no_repair_pack,
+        )
+        reporter.success(
+            f"Reviewed watched response kind={payload['kind']} status={payload['status']} report={payload['json_path']}."
+        )
+        return 0
+
+    if args.command == "compile-adaptive-context":
+        emit_command_start(reporter, "compile-adaptive-context", analysis_root=args.analysis_root.resolve())
+        targets = [int(item.strip()) for item in str(args.targets).split(",") if item.strip()]
+        if args.cluster:
+            if not args.stage:
+                raise ValueError("--stage is required when --cluster is used.")
+            payload = compile_adaptive_generic_context(
+                analysis_root=args.analysis_root.resolve(),
+                cluster_id=args.cluster,
+                phase=args.stage,
+                prompt_profile=args.prompt_profile,
+                targets=targets,
+            )
+        elif args.prompt_json:
+            payload = compile_adaptive_java_context(
+                analysis_root=args.analysis_root.resolve(),
+                prompt_json=args.prompt_json.resolve(),
+                prompt_profile=None if args.prompt_profile == "qwen3-128k-autonomous" else args.prompt_profile,
+                targets=targets,
+            )
+        else:
+            raise ValueError("Provide either --cluster with --stage or --prompt-json.")
+        paths = write_adaptive_payload(args.analysis_root.resolve(), payload)
+        reporter.success(
+            f"Generated {len(payload['variants'])} adaptive variant(s) and {len(paths)} artifact(s)."
+        )
+        return 0
+
+    if args.command == "shrink-prompt":
+        emit_command_start(reporter, "shrink-prompt", pack=args.pack_json.resolve(), target=args.target_tokens)
+        payload = json.loads(args.pack_json.resolve().read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or "prompt_text" not in payload:
+            raise ValueError("pack-json must be a JSON object that contains prompt_text.")
+        shrunk = shrink_prompt_text(str(payload["prompt_text"]), args.target_tokens)
+        output_root = (args.output_dir.resolve() if args.output_dir else resolve_analysis_root(args.pack_json.resolve().parents[1]))
+        adaptive_payload = {
+            "generated_at": payload.get("generated_at"),
+            "kind": "shrunk_prompt",
+            "source_pack": str(args.pack_json.resolve()),
+            "variants": [shrunk],
+        }
+        paths = write_adaptive_payload(output_root, adaptive_payload)
+        reporter.success(
+            f"Shrank prompt to estimated_tokens={shrunk['estimated_tokens']} target={args.target_tokens}, artifacts={len(paths)}."
+        )
+        return 0
+
     if args.command == "compile-context":
         emit_command_start(reporter, "compile-context", cluster=args.cluster, phase=args.phase)
         analysis_root = args.analysis_root.resolve()
@@ -1129,6 +1282,18 @@ def dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser, 
         reporter.success(
             f"Generated Java BFF skeleton for bundle={args.bundle_id} "
             f"artifact_count={len(result['artifacts'])}."
+        )
+        return 0
+
+    if args.command == "generate-java-bff-starter":
+        emit_command_start(reporter, "generate-java-bff-starter", bundle=args.bundle_id)
+        result = generate_java_bff_starter(
+            analysis_root=args.analysis_root.resolve(),
+            bundle_id=args.bundle_id,
+            package_name=args.package_name,
+        )
+        reporter.success(
+            f"Generated Java BFF starter for bundle={args.bundle_id} artifact_count={len(result['artifacts'])}."
         )
         return 0
 

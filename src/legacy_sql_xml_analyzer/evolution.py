@@ -69,6 +69,8 @@ def review_llm_response_from_analysis(
     base_name = f"{cluster_id}-{sanitize_token(stage)}"
     review_json_path = review_root / f"{base_name}-review.json"
     review_md_path = review_root / f"{base_name}-review.md"
+    review["review_json_path"] = str(review_json_path.resolve())
+    review["review_md_path"] = str(review_md_path.resolve())
     review_json_path.write_text(json.dumps(review, indent=2, ensure_ascii=False), encoding="utf-8")
     review_md_path.write_text(render_review_markdown(review), encoding="utf-8")
 

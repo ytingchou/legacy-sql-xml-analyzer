@@ -308,6 +308,20 @@ PYTHONPATH=src python3 -m legacy_sql_xml_analyzer repair-company-prompt \
   --review "$OUT_DIR/analysis/java_bff/reviews/<bundle>/<phase>-review.json"
 ```
 
+If you want the analyzer to tell you the safest next command instead of guessing:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer doctor-run --output "$OUT_DIR"
+```
+
+If the current prompt is still too large for your company model, generate smaller retry variants:
+
+```bash
+PYTHONPATH=src python3 -m legacy_sql_xml_analyzer compile-adaptive-context \
+  --analysis-root "$OUT_DIR" \
+  --prompt-json "$OUT_DIR/analysis/java_bff/phase_packs/<bundle>/phase-1-plan.json"
+```
+
 ### The analyzer itself still has unresolved XML problems
 
 Run the generic loop first:
